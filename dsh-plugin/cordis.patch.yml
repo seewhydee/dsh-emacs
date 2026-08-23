@@ -1,0 +1,8 @@
+# dsh-emacs-bridge bundle patch — inserts the bridge plugin row into the tree.
+# Applied as a layer when this package joins `dsh.profile.bundles` (via
+# `dsh plugin --profile <name> add dsh-emacs-bridge`). The row's `id` is the
+# patch/HMR target; `name` is the module specifier the Loader imports.
+- insert:
+    - id: dsh-bridge
+      name: dsh-emacs-bridge
+      config: {}
