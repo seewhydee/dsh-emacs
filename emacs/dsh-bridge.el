@@ -330,5 +330,50 @@ SESSION-ID is a session id string, or nil to target the last-active session."
       (setq dsh-bridge-target-session nil)
       (message "dsh-bridge: targeting the last-active session")))))
 
+(defun dsh-bridge--inbox-header (entry)
+  "Return a provenance header line for an outbox ENTRY."
+  (format "--- %s%s%s ---"
+          (or (alist-get 'source entry) "bridge")
+          (let ((sid (alist-get 'sessionId entry)))
+            (if sid (format " | session %s" sid) ""))
+          (let ((ts (alist-get 'ts entry)))
+            (if ts (format " | %s"
+                           (format-time-string "%Y-%m-%d %H:%M:%S"
+                                               (/ ts 1000)))
+              ""))))
+
+(defun dsh-bridge-pull-inbox ()
+  "Pull DSH→Emacs messages into *dsh-bridge-inbox*, acking after success.
+Entries are acked only after they are inserted, so a crash between the insert
+and the ack redelivers them on the next pull (duplicates, not loss)."
+  (interactive)
+  (let* ((result (dsh-bridge--request "GET" "/outbox" nil))
+         (status (car result))
+         (alist (cdr result)))
+    (cond
+     ((null status)
+      (message "dsh-bridge: request failed (is `dsh web' running?)"))
+     ((>= status 400)
+      (message "dsh-bridge: %s"
+               (or (alist-get 'error alist) (format "HTTP %s" status))))
+     (t
+      (let ((entries (alist-get 'entries alist))
+            (overflowed (alist-get 'overflowed alist)))
+        (when entries
+          (with-current-buffer (get-buffer-create "*dsh-bridge-inbox*")
+            (dolist (entry entries)
+              (insert (concat (dsh-bridge--inbox-header entry) "\n"))
+              (insert (or (alist-get 'text entry) ""))
+              (insert "\n\n"))
+            (goto-char (point-min)))
+          ;; Ack only after the insert above succeeded.
+          (dsh-bridge--request "POST" "/outbox/ack"
+                               `((ids . ,(mapcar (lambda (e) (alist-get 'id e)) entries)))))
+        (message "dsh-bridge: pulled %d message%s%s"
+                 (length entries)
+                 (if (= (length entries) 1) "" "s")
+                 (if overflowed " (overflow — some dropped)" ""))
+        (when entries (pop-to-buffer "*dsh-bridge-inbox*")))))))
+
 (provide 'dsh-bridge)
 ;;; dsh-bridge.el ends here

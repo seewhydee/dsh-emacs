@@ -21,9 +21,12 @@
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
 //   POST /dsh-bridge/select { sessionId | null }  -> pin the target session
 //   GET  /dsh-bridge/current                      -> the pinned target (or null)
+//   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
+//   POST /dsh-bridge/outbox { text, sessionId?, source? } -> deposit an entry
+//   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -31,6 +34,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
+import { Outbox } from './outbox.ts'
 import {
   isSubagentChild,
   latestAssistantText,
@@ -142,6 +146,9 @@ export function apply(ctx: Context): void {
   const sessionPersistence = ctx.get('sessionPersistence') as SessionPersistenceService
   const token = loadOrCreateToken(resolveTokenFilePath())
 
+  /** DSH→Emacs inbox, bounded and acked by Emacs after a successful insert. */
+  const outbox = new Outbox()
+
   /** The session id pinned by `/select`; undefined means last-active. */
   let selectedSessionId: string | undefined
 
@@ -243,6 +250,50 @@ export function apply(ctx: Context): void {
           selectedSessionId = undefined
         }
         sendJson(res, 200, { sessionId: selectedSessionId ?? null })
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/dsh-bridge/outbox') {
+        const { entries, overflowed } = outbox.collect()
+        sendJson(res, 200, { entries, overflowed })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/outbox') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown; source?: unknown; text?: unknown } | undefined
+          const text = typeof body?.text === 'string' ? body.text : ''
+          if (text.trim() === '') {
+            sendJson(res, 400, { error: 'text is required' })
+            return
+          }
+          const evicted = outbox.deposit({
+            id: randomUUID(),
+            sessionId: typeof body?.sessionId === 'string' ? body.sessionId : undefined,
+            source: typeof body?.source === 'string' ? body.source : 'bridge',
+            text,
+            ts: Date.now(),
+          })
+          sendJson(res, 200, { ok: true, evicted })
+        } catch (error: unknown) {
+          const status = error instanceof PayloadTooLargeError ? 413 : 500
+          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/outbox/ack') {
+        try {
+          const body = (await readJson(req)) as { ids?: unknown } | undefined
+          const ids = Array.isArray(body?.ids)
+            ? body.ids.filter((id): id is string => typeof id === 'string')
+            : []
+          outbox.ack(ids)
+          sendJson(res, 200, { ok: true, acked: ids.length })
+        } catch (error: unknown) {
+          const status = error instanceof PayloadTooLargeError ? 413 : 500
+          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
         return
       }
 

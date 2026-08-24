@@ -100,5 +100,31 @@
       (call-interactively #'dsh-bridge-select-session))
     (should (equal choices-seen '("live-1" "(last-active)")))))
 
+(defconst dsh-bridge-test--outbox-response
+  (cons 200
+        (list (cons 'entries
+                    (list (list (cons 'id "e1")
+                                (cons 'sessionId "s1")
+                                (cons 'source "message-action")
+                                (cons 'text "hello")
+                                (cons 'ts 1000))))
+              (cons 'overflowed nil))))
+
+(ert-deftest dsh-bridge-pull-inbox-inserts-and-acks ()
+  "Pull inserts each entry and acks the collected ids after a successful insert."
+  (let (acked-payload)
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (cond
+                  ((equal method "GET") dsh-bridge-test--outbox-response)
+                  ((equal method "POST") (setq acked-payload payload)
+                   (cons 200 (list (cons 'ok t))))
+                  (t (cons 404 (list (cons 'error "unexpected"))))))))
+      (dsh-bridge-pull-inbox)
+      (should (string-match-p "hello"
+                              (with-current-buffer "*dsh-bridge-inbox*"
+                                (buffer-string))))
+      (should (equal acked-payload '((ids . ("e1"))))))))
+
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

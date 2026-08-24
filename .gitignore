@@ -12,3 +12,6 @@ pnpm-lock.yaml
 .#*
 *~
 *.elc
+
+# Working plan files (not part of the committed repo).
+phase-*.md
