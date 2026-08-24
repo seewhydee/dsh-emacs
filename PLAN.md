@@ -5,10 +5,10 @@ session. The DSH text window is small and typing-poor; Emacs is a full editor
 but lacks DSH's live agent. This project lets text move in both directions
 without window-switching and copy-paste.
 
-Status: Phase 1 (session inventory and targeting) is implemented and in
-review — `GET /sessions` merges live + persisted sessions, `/select` pins a
-live session, and all routes accept a per-request `sessionId` override. The
-next milestone is Phase 2 (auth token + robustness) — see the
+Status: Phase 2 (auth token + robustness + unit tests) is implemented and in
+review — every `/dsh-bridge` route now requires `Authorization: Bearer`, the
+subagent filter is tightened, and both the plugin (Vitest) and the Emacs
+package (ERT) have unit tests. The next milestone is Phase 3 — see the
 [Roadmap](#roadmap-phased).
 
 ## Names (locked)
@@ -156,6 +156,10 @@ Decisions already taken (2026-08, with the seam verification above):
   `ctx.agents.resume()` is a later phase, as is any bridge-owned session via
   `ctx.agents.create()`).
 - **Auth:** a shared bearer token on all `/dsh-bridge` routes, early.
+- **Testing:** Vitest for the TypeScript plugin (unit tests of extracted pure
+  logic) and ERT for the Elisp helpers, introduced in Phase 2. Plugin logic
+  lives in dependency-free pure modules (`src/logic.ts`) so tests never boot a
+  host; `index.ts` stays thin wiring over the Cordis services.
 - **DSH→Emacs push:** Emacs pulls from a host-side outbox; no `emacsclient`
   push for text transfer.
 - **Host→browser push:** the plugin serves its own SSE route; the client
@@ -184,16 +188,25 @@ Every later feature needs session ids, so this came first.
     `dsh-bridge-current-session`; send/output honor the chosen session, falling
     back to last-active.
 
-### Phase 2 — Auth token and robustness
+### Phase 2 — Auth token, robustness, and unit tests (implemented)
 
-- Host: generate (or read) a shared token from a file under the dsh profile /
-  a well-known path, mode 0600; require `Authorization: Bearer` on every
-  `/dsh-bridge` route.
-- Emacs: `dsh-bridge-token` (read from the same file by default); send the
+- **Refactor first:** extract the plugin's pure, dependency-free logic into
+  `src/logic.ts` — `latestAssistantText`, `mergeSessionRows`, the subagent-child
+  predicate, `resolveTargetId`, and the bearer parse + constant-time compare —
+  so it can be unit-tested without booting a host. `index.ts` becomes thin
+  wiring.
+- **Testing:** Vitest (`dsh-plugin/tests/*.spec.ts`) for the plugin, run by
+  `pnpm test`; ERT (`emacs/dsh-bridge-tests.el`) for the Elisp helpers, run by
+  `emacs --batch`. No system packages: Vitest is an npm devDependency and ERT
+  ships with Emacs.
+- **Host:** generate (or read) a shared token from `$DSH_HOME/dsh-bridge-token`
+  (default `~/.dsh/dsh-bridge-token`, mode 0600); require
+  `Authorization: Bearer` on every route (401 otherwise).
+- **Emacs:** `dsh-bridge-token` (read from the same file by default); send the
   header on every request.
-- Robustness: tighten subagent filtering (also skip sessions whose live parent
-  owns them, matching `agent-lookup.ts`'s `hasApiRemoteSubagentOwner`); surface
-  HTTP status codes in Emacs error messages; handle `url-retrieve` timeouts.
+- **Robustness:** tighten subagent filtering (also skip sessions whose live
+  parent owns them, matching `hasApiRemoteSubagentOwner`); surface HTTP status
+  codes in Emacs error messages; handle `url-retrieve` timeouts.
 
 ### Phase 3 — Client plugin: "Send to Emacs" button and composer draft
 

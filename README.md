@@ -121,4 +121,4 @@ active session when none is selected.
 
 ## License
 
-GPLv3 or later.  See [COPYRIGHT](COPYRIGHT).
+GPLv3 or later.  See [COPYING](COPYING).

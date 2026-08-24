@@ -14,22 +14,35 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
-// MVP: data transfer to/from the DSH text box over loopback HTTP.
+// Routes (all require `Authorization: Bearer <token>`; see logic.ts for the
+// pure decision logic this wiring delegates to):
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
 //   POST /dsh-bridge/select { sessionId | null }  -> pin the target session
 //   GET  /dsh-bridge/current                      -> the pinned target (or null)
-//
-// The bridge targets whichever conversation is currently active in DSH: the
-// live session whose event log is newest, ignoring subagent child sessions. A
-// selected session pins the target; a per-request `sessionId` overrides both.
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
+import {
+  isSubagentChild,
+  latestAssistantText,
+  mergeSessionRows,
+  parseBearerAuthorization,
+  resolveTargetId,
+  tokensEqual,
+  type LiveSessionLike,
+  type ResolveTargetResult,
+  type SessionHeaderLike,
+  type SessionRow,
+} from './logic.ts'
 
 export const name = 'dsh-bridge'
 
@@ -54,36 +67,44 @@ interface SessionPersistenceService {
   list(signal?: AbortSignal): Promise<SessionHeader[]>
 }
 
-/** One entry in the merged session inventory handed to Emacs. */
-interface SessionRow {
-  id: string
-  cwd: string | null
-  live: boolean
-  lastActive?: number
-  createdAt: number
+/** The target of a bridge operation: a live session plus its live agent. */
+interface BridgeTarget {
+  session: Session
+  agent: Agent
 }
 
 /**
- * Latest assistant text in one session's current transcript, newest-first.
- * Reads the derived view (not the raw event log) so compaction-replaced
- * history stays hidden; assistant turns with no text (tool-call-only steps)
- * fall through to the previous one.
+ * Resolve the shared token file: `$DSH_HOME/dsh-bridge-token`, defaulting to
+ * `~/.dsh/dsh-bridge-token`. Delegates to `resolveDshHome` so the tilde
+ * expansion, whitespace handling, and relative-path resolution match the
+ * harness itself (a relative `$DSH_HOME` resolves against the `dsh` process
+ * working directory); the Emacs side mirrors the same rules.
  */
-function latestAssistantText(agent: Agent): string {
-  const messages = agent.session.deriveMessages()
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]
-    if (message.role !== 'assistant') continue
-    const text = message.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
-      .join('')
-    if (text !== '') return text
+function resolveTokenFilePath(): string {
+  return join(resolveDshHome(), 'dsh-bridge-token')
+}
+
+/** Read the shared token, or generate one and write it mode 0600. */
+function loadOrCreateToken(path: string): string {
+  if (existsSync(path)) {
+    const existing = readFileSync(path, 'utf8').trim()
+    if (existing !== '') return existing
   }
-  return ''
+  const token = randomBytes(32).toString('hex')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, token + '\n', { mode: 0o600 })
+  return token
 }
 
 const MAX_BODY_BYTES = 1024 * 1024
+
+/** Thrown by `readJson` when the body exceeds `MAX_BODY_BYTES`; reported as 413. */
+class PayloadTooLargeError extends Error {
+  constructor() {
+    super('request body too large')
+    this.name = 'PayloadTooLargeError'
+  }
+}
 
 /** Read a bounded JSON request body; rejects on oversize or malformed input. */
 function readJson(req: IncomingMessage): Promise<unknown> {
@@ -93,7 +114,7 @@ function readJson(req: IncomingMessage): Promise<unknown> {
     req.on('data', (chunk: string) => {
       body += chunk
       if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
-        reject(new Error('request body too large'))
+        reject(new PayloadTooLargeError())
         req.destroy()
       }
     })
@@ -115,113 +136,82 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(payload)
 }
 
-/** The target of a bridge operation: a live session plus its live agent. */
-interface BridgeTarget {
-  session: Session
-  agent: Agent
-}
-
-/** The result of resolving a request's target session. */
-interface ResolvedTarget {
-  target?: BridgeTarget
-  error?: string
-}
-
 export function apply(ctx: Context): void {
   const webServer = ctx.get('webServer') as WebServerService
   const sessions = ctx.get('sessions') as SessionService
   const sessionPersistence = ctx.get('sessionPersistence') as SessionPersistenceService
+  const token = loadOrCreateToken(resolveTokenFilePath())
 
   /** The session id pinned by `/select`; undefined means last-active. */
   let selectedSessionId: string | undefined
 
-  /** Live sessions the bridge may target (subagent children excluded). */
-  function liveSessions(): Session[] {
-    return sessions.list().filter(session => session.header.origin !== 'subagent')
+  /** Whether a live session is owned by its live parent agent. */
+  function ownedByLiveParent(session: Session): boolean {
+    const parentId = session.header.parentSession
+    if (parentId === undefined) return false
+    const agent = ctx.agents.get(session.id)
+    if (agent === undefined) return false
+    const parent = ctx.agents.get(parentId)
+    return parent !== undefined && ctx.agents.isOwnedBy(agent.id, parent)
   }
 
-  /** A live, non-subagent session by its string id. */
-  function liveSessionById(id: string): Session | undefined {
-    return liveSessions().find(session => String(session.id) === id)
+  /** Live sessions the bridge may target, shaped for the pure logic. */
+  function targetableSessions(): LiveSessionLike[] {
+    return sessions.list()
+      .filter(session => !isSubagentChild(session.header.origin, ownedByLiveParent(session)))
+      .map((session): LiveSessionLike => ({
+        id: String(session.id),
+        header: { cwd: session.header.cwd, createdAt: session.header.createdAt },
+        events: session.events,
+      }))
   }
 
-  /** The live agent for a live session, when one is registered. */
-  function targetFor(session: Session): BridgeTarget | undefined {
+  /** Whether a live, targetable session id has a live agent. */
+  function hasAgent(id: string): boolean {
+    const session = sessions.list().find(s => String(s.id) === id)
+    return session !== undefined && ctx.agents.get(session.id) !== undefined
+  }
+
+  /** Whether an id is a drivable target (live, non-subagent, with an agent). */
+  function isLiveTarget(id: string): boolean {
+    return targetableSessions().some(session => session.id === id) && hasAgent(id)
+  }
+
+  /** Resolve a resolved target id back to its live session + agent. */
+  function targetById(id: string): BridgeTarget | undefined {
+    const session = sessions.list().find(s => String(s.id) === id)
+    if (session === undefined) return undefined
     const agent = ctx.agents.get(session.id)
     return agent === undefined ? undefined : { session, agent }
   }
 
-  /**
-   * The live session to target when nothing is pinned: the most recently
-   * active one (newest event `time`, falling back to `createdAt`).
-   */
-  function lastActiveSession(): BridgeTarget | undefined {
-    let best: BridgeTarget | undefined
-    let bestTime = -Infinity
-    for (const session of liveSessions()) {
-      const target = targetFor(session)
-      if (target === undefined) continue
-      const time = session.events.at(-1)?.time ?? session.header.createdAt
-      if (time > bestTime) {
-        bestTime = time
-        best = target
-      }
-    }
-    return best
+  /** Resolve a request's effective target via the pure precedence logic. */
+  function resolveTarget(explicitId: string | undefined): ResolveTargetResult {
+    return resolveTargetId(explicitId, selectedSessionId, targetableSessions(), hasAgent)
   }
 
-  /**
-   * Resolve a request's effective target: an explicit `sessionId` wins, then
-   * the pinned target, then last-active. A non-live explicit id is an error
-   * (resume is not implemented); a pinned id that has gone away falls back.
-   */
-  function resolveTarget(explicitId: string | undefined): ResolvedTarget {
-    if (explicitId !== undefined) {
-      const session = liveSessionById(explicitId)
-      if (session === undefined) return { error: `session ${explicitId} is not live` }
-      const target = targetFor(session)
-      if (target === undefined) return { error: `session ${explicitId} has no live agent` }
-      return { target }
-    }
-    if (selectedSessionId !== undefined) {
-      const session = liveSessionById(selectedSessionId)
-      const target = session === undefined ? undefined : targetFor(session)
-      if (target !== undefined) return { target }
-      // The pinned session is gone or undrivable — fall through to last-active.
-    }
-    return { target: lastActiveSession() }
-  }
-
-  /** Merge live sessions with persisted (cold) headers, deduping live ids. */
+  /** Merge live sessions with persisted headers via the pure merge logic. */
   async function listSessions(): Promise<SessionRow[]> {
-    const liveIds = new Set<string>()
-    const rows: SessionRow[] = []
-    for (const session of liveSessions()) {
-      const id = String(session.id)
-      liveIds.add(id)
-      rows.push({
-        id,
-        cwd: session.header.cwd ?? null,
-        live: true,
-        lastActive: session.events.at(-1)?.time ?? session.header.createdAt,
-        createdAt: session.header.createdAt,
-      })
-    }
-    // `sessionPersistence` is a required inject, so it is always present; the
-    // try/catch guards backend *errors* — a persistence failure is auxiliary
-    // to the live view and must not hide the sessions that are running now.
+    let persisted: SessionHeaderLike[] = []
     try {
       const headers = await sessionPersistence.list()
-      for (const header of headers) {
-        if (header.origin === 'subagent') continue
-        const id = String(header.id)
-        if (liveIds.has(id)) continue
-        rows.push({ id, cwd: header.cwd ?? null, live: false, createdAt: header.createdAt })
-      }
+      persisted = headers.map((header): SessionHeaderLike => ({
+        id: String(header.id),
+        cwd: header.cwd,
+        createdAt: header.createdAt,
+        origin: header.origin,
+      }))
     } catch {
-      // Best-effort per the comment above.
+      // Persistence listing is auxiliary to the live view; a backend failure
+      // must not hide the sessions that are actually running now.
     }
-    return rows
+    return mergeSessionRows(targetableSessions(), persisted)
+  }
+
+  /** Whether a request carries the shared token as a bearer credential. */
+  function authorized(req: IncomingMessage): boolean {
+    const provided = parseBearerAuthorization(req.headers.authorization)
+    return provided !== undefined && tokensEqual(token, provided)
   }
 
   // Registered inside an effect so a config hot-reload disposes the route
@@ -230,6 +220,11 @@ export function apply(ctx: Context): void {
     kind: 'prefix',
     path: '/dsh-bridge',
     handler: async (req, res) => {
+      if (!authorized(req)) {
+        sendJson(res, 401, { error: 'unauthorized' })
+        return
+      }
+
       const url = new URL(req.url ?? '/', 'http://localhost')
       const pathname = url.pathname
 
@@ -243,14 +238,9 @@ export function apply(ctx: Context): void {
       }
 
       if (req.method === 'GET' && pathname === '/dsh-bridge/current') {
-        // A pin is only truthful while it still resolves to a drivable
-        // target; a dead pin is cleared so Emacs does not re-target a
-        // session the bridge can no longer reach.
-        if (selectedSessionId !== undefined) {
-          const session = liveSessionById(selectedSessionId)
-          if (session === undefined || targetFor(session) === undefined) {
-            selectedSessionId = undefined
-          }
+        // A pin is only truthful while it still resolves to a drivable target.
+        if (selectedSessionId !== undefined && !isLiveTarget(selectedSessionId)) {
+          selectedSessionId = undefined
         }
         sendJson(res, 200, { sessionId: selectedSessionId ?? null })
         return
@@ -269,19 +259,19 @@ export function apply(ctx: Context): void {
             sendJson(res, 400, { error: 'sessionId must be a non-empty string or null' })
             return
           }
-          const session = liveSessionById(id)
-          if (session === undefined) {
+          if (!targetableSessions().some(session => session.id === id)) {
             sendJson(res, 404, { error: `session ${id} is not live` })
             return
           }
-          if (targetFor(session) === undefined) {
+          if (!hasAgent(id)) {
             sendJson(res, 409, { error: `session ${id} has no live agent` })
             return
           }
           selectedSessionId = id
           sendJson(res, 200, { ok: true, sessionId: id })
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          const status = error instanceof PayloadTooLargeError ? 413 : 500
+          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
@@ -302,11 +292,12 @@ export function apply(ctx: Context): void {
             }
             explicitId = body.sessionId
           }
-          const { target, error } = resolveTarget(explicitId)
-          if (error !== undefined) {
-            sendJson(res, 404, { error })
+          const result = resolveTarget(explicitId)
+          if (result.kind === 'error') {
+            sendJson(res, result.status, { error: result.message })
             return
           }
+          const target = targetById(result.id)
           if (target === undefined) {
             sendJson(res, 409, { error: 'no active session' })
             return
@@ -317,22 +308,27 @@ export function apply(ctx: Context): void {
           }))
           sendJson(res, 200, { ok: true, sessionId: String(target.session.id) })
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          const status = error instanceof PayloadTooLargeError ? 413 : 500
+          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
 
       if (req.method === 'GET' && pathname === '/dsh-bridge/output') {
-        const { target, error } = resolveTarget(url.searchParams.get('sessionId') ?? undefined)
-        if (error !== undefined) {
-          sendJson(res, 404, { error })
+        const result = resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+        if (result.kind === 'error') {
+          sendJson(res, result.status, { error: result.message })
           return
         }
+        const target = targetById(result.id)
         if (target === undefined) {
           sendJson(res, 404, { error: 'no active session' })
           return
         }
-        sendJson(res, 200, { sessionId: String(target.session.id), text: latestAssistantText(target.agent) })
+        sendJson(res, 200, {
+          sessionId: String(target.session.id),
+          text: latestAssistantText(target.agent.session.deriveMessages()),
+        })
         return
       }
 
