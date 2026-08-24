@@ -20,17 +20,18 @@ directly into Emacs.  That is handled by Deepseek Harness; Emacs (or
 
 ## Status
 
-MVP prototype.  It currently supports:
+Working prototype.  It currently supports:
 
 - sending a region or buffer to DSH as a prompt;
-- fetching the latest assistant reply into an Emacs buffer.
+- fetching the latest assistant reply into an Emacs buffer;
+- listing live and persisted DSH sessions, and choosing which live session
+  the bridge targets (with a per-call override).
 
 Everything else — setting the composer draft instead of auto-submitting (so
 you can review the prompt in DSH before it runs), a `/emacs` edit command, a
-composer button, choosing one session from a session list, live streaming — is
-a later phase.  The bridge targets the most recently active DSH session
-automatically.  The scope-reducing decisions and the roadmap live in
-[PLAN.md](PLAN.md).
+composer button, resuming persisted sessions, live streaming — is a later
+phase.  By default the bridge targets the most recently active DSH session.
+The scope-reducing decisions and the roadmap live in [PLAN.md](PLAN.md).
 
 ## Requirements
 
@@ -47,6 +48,15 @@ The plugin ships as ESM JavaScript built by
 cd dsh-plugin
 pnpm install   # first time only
 pnpm build     # emits lib/index.js
+```
+
+Note: with the dev setup where `dsh-plugin/node_modules` is a symlink into
+the harness checkout, `pnpm build` may abort with "Aborted removal of modules
+directory due to no TTY" — pnpm wants to purge the symlinked modules before
+running scripts.  Invoke the builder directly instead:
+
+```sh
+./node_modules/.bin/tsdown
 ```
 
 ## Install the plugin into dsh
@@ -100,6 +110,14 @@ From Emacs:
 - `M-x dsh-bridge-send-buffer` — send the whole buffer.
 - `M-x dsh-bridge-get-output` — fetch the latest DSH assistant reply into
   `*dsh-bridge-output*`.
+- `M-x dsh-bridge-list-sessions` — browse live and saved DSH sessions in a
+  `*dsh-bridge-sessions*` buffer; `RET` selects the session under point.
+- `M-x dsh-bridge-select-session` — choose the target session (live sessions
+  only; choose `(last-active)` to unpin).
+- `M-x dsh-bridge-current-session` — show (and re-sync) the current target.
+
+Sends and output fetches go to the selected session, or to the most recently
+active session when none is selected.
 
 ## License
 
