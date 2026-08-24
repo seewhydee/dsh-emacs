@@ -1,20 +1,22 @@
 # dsh-emacs
 
 A two-way bridge between an Emacs session and a running
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) session.
+[Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness) session.
 
-The DSH text window is small and typing-poor; Emacs is a full editor but lacks
-DSH's live agent.  This bridge moves text in both directions over loopback
-HTTP, so you can type in Emacs and read DSH's replies without window-switching
-and copy-paste.
+This bridge moves text from Emacs to Deepseek Harness, and vice versa,
+over loopback HTTP.  This allows you to type in Emacs and read DSH's
+replies without window-switching and copy-paste.
+
+Unlike [agent-shell](https://github.com/xenodium/agent-shell) and
+[gptel](https://gptel.org/), we don't stream voluminous LLM outputs
+directly into Emacs.  That is handled by Deepseek Harness; Emacs (or
+`emacsclient`) pulls data in or out of Deepseek Harness as necessary.
 
 ## Components
 
 - `dsh-plugin/` — `dsh-emacs-bridge`, a DeepSeek Harness host plugin (Cordis id
-  `dsh-bridge`).  It registers a loopback HTTP route that submits prompts and
-  serves back the latest assistant reply.
-- `emacs/dsh-bridge.el` — the Emacs side (feature `dsh-bridge`), which talks to
-  that route.
+  `dsh-bridge`) that registers a loopback HTTP route.
+- `emacs/dsh-bridge.el` — an Emacs package connecting to that route.
 
 ## Status
 
@@ -23,9 +25,12 @@ MVP prototype.  It currently supports:
 - sending a region or buffer to DSH as a prompt;
 - fetching the latest assistant reply into an Emacs buffer.
 
-Everything else — a `/emacs` edit command, a composer button,
-per-workspace/session targeting, live streaming — is a later phase.  The
-scope-reducing decisions and the roadmap live in [PLAN.md](PLAN.md).
+Everything else — setting the composer draft instead of auto-submitting (so
+you can review the prompt in DSH before it runs), a `/emacs` edit command, a
+composer button, choosing one session from a session list, live streaming — is
+a later phase.  The bridge targets the most recently active DSH session
+automatically.  The scope-reducing decisions and the roadmap live in
+[PLAN.md](PLAN.md).
 
 ## Requirements
 
@@ -50,25 +55,32 @@ The plugin is a dsh *bundle*: it declares `dsh.bundle` and inserts one row into
 the composition.  Install it into the `web` profile with a filesystem link, then
 restart `dsh web` so the profile reloads its bundle set:
 
+How you invoke `dsh` depends on how it is installed.  A global install puts a
+`dsh` binary on PATH.  A source checkout has no such binary, so you run it as a
+pnpm script (`pnpm dsh web`, i.e. `node --import tsx/esm apps/cli/src/bin.ts`)
+from the harness directory.
+
+The `link:` path resolves relative to the directory you invoke `dsh` from.
+Running `pnpm dsh` sets that directory to the harness checkout, so the
+repo-root-relative `./dsh-plugin` form only works with a global `dsh` binary on
+PATH, invoked from this repo root.  Use the form that matches your setup:
+
 ```sh
-# from the repo root
+# global install, from this repo root:
 dsh plugin --profile web add link:./dsh-plugin
 dsh web
+
+# source checkout, from the harness directory (absolute path):
+pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs/dsh-plugin
+pnpm dsh web
 ```
 
 Confirm the row composed:
 
 ```sh
-dsh web --dump-config | grep -A2 dsh-bridge
+dsh web --dump-config | grep -A2 dsh-bridge          # global install
+pnpm dsh web --dump-config | grep -A2 dsh-bridge     # source checkout
 ```
-
-The plugin's `config` block accepts:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `sessionId` | `dsh-emacs` | The one session the bridge targets (created on first send). |
-| `cwd` | process cwd | Working directory for a newly created session. |
-| `presetId` | deployment default | Agent preset to compose for the session. |
 
 ## Install the Emacs package
 

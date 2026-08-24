@@ -1,9 +1,11 @@
-import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
-import { SessionId } from "@deepseek-ai/dsh-session";
 //#region src/index.ts
 const name = "dsh-bridge";
-const inject = ["agents", "webServer"];
+const inject = [
+	"agents",
+	"webServer",
+	"sessions"
+];
 /**
 * Latest assistant text in one session's current transcript, newest-first.
 * Reads the derived view (not the raw event log) so compaction-replaced
@@ -49,70 +51,36 @@ function sendJson(res, status, value) {
 	res.writeHead(status, { "content-type": "application/json" });
 	res.end(payload);
 }
-function apply(ctx, config = {}) {
+function apply(ctx) {
 	const webServer = ctx.get("webServer");
-	const sessionId = SessionId(config.sessionId ?? "dsh-emacs");
-	const cwd = config.cwd ?? process.cwd();
-	const ownedAgents = /* @__PURE__ */ new Set();
-	/** Compose a fresh agent exactly the way the Web gateway does. */
-	async function createAgent() {
-		const defaultModel = ctx.get("agentDefaultModel");
-		if (defaultModel === void 0) throw new Error("dsh-bridge: ctx.agentDefaultModel is unavailable");
-		const selection = defaultModel.currentSelection();
-		const presets = ctx.get("agentPresets");
-		const installSelection = (agentCtx) => {
-			installModelSelection(agentCtx, {
-				current: {
-					provider: selection.provider,
-					model: selection.model
-				},
-				assembled: void 0
-			});
-		};
-		let agentPreset;
-		let setup;
-		if (presets === void 0) setup = async (agentCtx) => {
-			installSelection(agentCtx);
-		};
-		else {
-			const resolvedId = (await presets.resolve(config.presetId)).id;
-			agentPreset = resolvedId;
-			setup = async (agentCtx) => {
-				installSelection(agentCtx);
-				await presets.mount(agentCtx, resolvedId);
-			};
+	const sessions = ctx.get("sessions");
+	/**
+	* The live session to target: the most recently active one. Subagent child
+	* sessions are ignored so the bridge follows the top-level conversation the
+	* user is driving, never a background child it spawned. The session's agent
+	* must be live — there is nothing to drive for a session without one.
+	*
+	* @returns the target, or undefined when no live agent-backed top-level
+	*   session exists.
+	*/
+	function lastActiveSession() {
+		let best;
+		let bestTime = -Infinity;
+		for (const session of sessions.list()) {
+			if (session.header.origin === "subagent") continue;
+			const agent = ctx.agents.get(session.id);
+			if (agent === void 0) continue;
+			const time = session.events.at(-1)?.time ?? session.header.createdAt;
+			if (time > bestTime) {
+				bestTime = time;
+				best = {
+					session,
+					agent
+				};
+			}
 		}
-		const handle = await ctx.agents.create({
-			sessionId,
-			agentOptions: {
-				provider: selection.provider,
-				model: selection.model
-			},
-			meta: {
-				cwd,
-				...agentPreset === void 0 ? {} : { agentPreset }
-			},
-			setup
-		});
-		ownedAgents.add(handle);
-		return handle;
+		return best;
 	}
-	/** In-flight creation, so concurrent sends share one agent. */
-	let creating;
-	/** The live agent for `sessionId`, creating it on first use. */
-	async function ensureAgent() {
-		const live = ctx.agents.get(sessionId);
-		if (live !== void 0) return live;
-		creating ??= createAgent().finally(() => {
-			creating = void 0;
-		});
-		return (await creating).agent;
-	}
-	ctx.effect(() => async () => {
-		const handles = [...ownedAgents];
-		ownedAgents.clear();
-		await Promise.all(handles.map((handle) => handle.dispose()));
-	});
 	ctx.effect(() => webServer.register({
 		kind: "prefix",
 		path: "/dsh-bridge",
@@ -126,7 +94,12 @@ function apply(ctx, config = {}) {
 						sendJson(res, 400, { error: "text is required" });
 						return;
 					}
-					(await ensureAgent()).followup(createUserMessage({
+					const target = lastActiveSession();
+					if (target === void 0) {
+						sendJson(res, 409, { error: "no active session" });
+						return;
+					}
+					target.agent.followup(createUserMessage({
 						content: [{
 							type: "text",
 							text
@@ -135,7 +108,7 @@ function apply(ctx, config = {}) {
 					}));
 					sendJson(res, 200, {
 						ok: true,
-						sessionId: String(sessionId)
+						sessionId: String(target.session.id)
 					});
 				} catch (error) {
 					sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
@@ -143,17 +116,14 @@ function apply(ctx, config = {}) {
 				return;
 			}
 			if (req.method === "GET" && pathname === "/dsh-bridge/output") {
-				const agent = ctx.agents.get(sessionId);
-				if (agent === void 0) {
-					sendJson(res, 404, {
-						error: "no live session",
-						sessionId: String(sessionId)
-					});
+				const target = lastActiveSession();
+				if (target === void 0) {
+					sendJson(res, 404, { error: "no active session" });
 					return;
 				}
 				sendJson(res, 200, {
-					sessionId: String(sessionId),
-					text: latestAssistantText(agent)
+					sessionId: String(target.session.id),
+					text: latestAssistantText(target.agent)
 				});
 				return;
 			}

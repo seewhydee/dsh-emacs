@@ -35,26 +35,32 @@ The initial commit is this MVP working end-to-end.
 These deliberately cut scope to reach the MVP. Each is a later phase, not a
 permanent answer.
 
-- **Session targeting** — MVP uses exactly one session, named by config
-  `sessionId` (default `dsh-emacs`), created on first send and reused while the
-  process lives. *Revisit:* per-workspace / per-GUI-session selection, resume
-  across restarts (persistence), the buffer→workspace→session mapping.
+- **Session targeting** — the bridge targets the session that is currently
+  active in DSH (the live session whose event log is newest, ignoring subagent
+  children); it does not create or configure a session. *Revisit:* pull a
+  session list into Emacs and let the user choose which conversation to move
+  text in/out of, plus resume across restarts
+  (persistence), the buffer→workspace→session mapping.
 - **Output channel** — MVP is an on-demand HTTP pull (`GET /output`, latest
   assistant text). *Revisit:* drop-file / live-tail streaming into a running
   buffer.
 - **Send semantics** — `POST /send` submits the text and opens a turn (it does
-  not "set the composer draft"). *Revisit:* a "set draft only" path (needs a
-  client-side gesture).
-- **Model selection** — the bridge installs a one-time snapshot of the default
-  model selection (`agentDefaultModel.currentSelection()` at agent creation),
-  unlike the gateway's live three-tier getter. A later default-model change
-  does not reach bridge sessions. *Revisit:* live selection getter, model
-  switching, and the double-`installModelSelection` interaction if a browser
-  client ever opens a bridge session.
-- **Session durability** — bridge sessions are in-memory only: no workspace
-  attach, no `mkdir` of `cwd`, no persisted-session resume after a `dsh web`
-  restart (the gateway does all three). *Revisit:* adopt `ensureSession`-style
-  resume once session targeting lands.
+  not "set the composer draft"). *Revisit:* a "set draft only" path so the
+  prompt lands in the composer and the user submits it by hand. This needs a
+  client-side (browser) hook, because the composer draft is browser-owned and
+  the host has no handle into it. Two viable routes: (a) extend the harness's
+  host→client `host/remote-event` allowlist (`API_REMOTE_FORWARDED_EVENTS`) and
+  add a client draft handler — clean, but edits reference-only
+  `deepseek-harness`; or (b) ship a `dsh.client` plugin from this repo that
+  polls a host draft route and calls `SessionInput.setDraft` — no harness
+  source change, but polling and the client-plugin plumbing. Decided: defer.
+- **Model selection** — the bridge reuses the active session's existing agent,
+  so it never composes an agent or installs a model selection of its own; model
+  and preset decisions stay with the session the GUI created. *Revisit:* none
+  until the bridge can open its own session.
+- **Session durability** — the bridge owns no session, so there is nothing to
+  persist or resume; it rides whatever session the GUI keeps live. *Revisit:*
+  none until the bridge can open its own session.
 
 ## Architecture
 
@@ -83,15 +89,15 @@ loopback-only — right for a local Emacs bridge.
 
 ## DSH plugin (`dsh-emacs-bridge`) — MVP shape
 
-- Function plugin: `export const name = 'dsh-bridge'`, `inject`, `Config`,
-  `apply`. No default export. MVP `inject: ['agents', 'webServer']`;
-  `agentDefaultModel`, `agentPresets` read via `ctx.get(...)`.
-- Config fields (no hardcoded tunables):
-  - `sessionId` (default `dsh-emacs`) — the one session the MVP targets.
-  - `cwd` (default `process.cwd()`) — the session's working directory.
-  - `presetId` (optional) — preset to compose; absent = deployment default.
+- Function plugin: `export const name = 'dsh-bridge'`, `inject`, `apply`. No
+  default export and no `Config`: the bridge rides the active session. MVP
+  `inject: ['agents', 'webServer', 'sessions']`; `sessions` read via
+  `ctx.get(...)`.
+- Targeting: enumerate live sessions (`sessions.list()`), skip subagent
+  children, pick the one whose newest event `time` is latest, and drive its
+  live agent (`ctx.agents.get(id)`).
 - HTTP routes (under `/dsh-bridge/`):
-  - `POST /send { text }` → ensure agent → `followup()`.
+  - `POST /send { text }` → last-active agent → `followup()`.
   - `GET /output` → latest assistant text.
 
 ## Emacs package (`dsh-bridge.el`) — MVP shape
@@ -124,8 +130,9 @@ dsh-emacs/
 - **Build:** tsdown bundles `src/index.ts` → ESM `lib/index.js`. Requires
   `fixedExtension: false` with `"type": "module"` (tsdown's default is
   `fixedExtension = platform === "node"` = true, which would emit `.mjs`).
-  Verified: `lib/index.js` exports `{ apply, inject, name }`, no runtime imports
-  (the type-only `Context` import is erased).
+  Verified: `lib/index.js` exports `{ apply, inject, name }`, runtime import
+  `createUserMessage` from `@deepseek-ai/dsh-llm` (the type-only `Context`,
+  `Agent`, and `Session` imports are erased).
 - **Build tooling (dev):** tsdown is invoked from the checkout's `node_modules`
   via a gitignored `dsh-plugin/node_modules` symlink; a later `pnpm install` in
   the plugin replaces that.
@@ -138,8 +145,9 @@ dsh-emacs/
   with a `file://…/lib/index.js` name. `--dump-config` showed the `dsh-bridge`
   row; a `--no-open --port 3099` boot settled and served HTTP 200 with no
   import/apply error — the Loader imported `lib/index.js`, resolved
-  `inject: ['agents']`, and ran `apply()`. `boot()` asserts every enabled entry
-  activates, so a failed import/apply would have exited nonzero.
+  `inject: ['agents', 'webServer', 'sessions']`, and ran `apply()`. `boot()`
+  asserts every enabled entry activates, so a failed import/apply would have
+  exited nonzero.
 - **Real install (to exercise next):** `dsh plugin --profile web add
   link:../dsh-emacs/dsh-plugin` (pnpm symlinks the checkout), then the bare
   `name: dsh-emacs-bridge` resolves via the internal module loader from the

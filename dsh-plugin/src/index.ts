@@ -18,34 +18,22 @@
 //   POST /dsh-bridge/send   { text } -> Agent.followup() (submits a prompt)
 //   GET  /dsh-bridge/output          -> latest assistant text for the session
 //
-// Scope-reducing decisions (see PLAN.md): one configured session, on-demand
-// output pull, submit-not-draft.
+// The bridge targets whichever conversation is currently active in DSH: the
+// live session whose event log is newest, ignoring subagent child sessions.
+// No session is configured or created here — the bridge rides the session the
+// user is already working in.
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  installModelSelection,
-  type Agent,
-  type ModelSelection,
-  type ModelSelectionRef,
-} from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session } from '@deepseek-ai/dsh-session'
 
 export const name = 'dsh-bridge'
 
-export const inject = ['agents', 'webServer']
+export const inject = ['agents', 'webServer', 'sessions']
 
-export interface Config {
-  /** The one session the bridge targets; created on first send and reused. */
-  sessionId?: string
-  /** Absolute working directory for a newly created session. */
-  cwd?: string
-  /** Agent preset id; omitted resolves the deployment default preset. */
-  presetId?: string
-}
-
-/** Minimal face of the optional `webServer` service. */
+/** Minimal face of the `webServer` service. */
 interface WebServerService {
   register(route: {
     kind: 'exact' | 'prefix'
@@ -54,21 +42,9 @@ interface WebServerService {
   }): () => void
 }
 
-/** Minimal face of the optional `agentDefaultModel` service. */
-interface DefaultModelService {
-  currentSelection(): ModelSelection
-}
-
-/** Minimal face of the optional `agentPresets` service. */
-interface PresetService {
-  resolve(id?: string): Promise<{ id: string }>
-  mount(agentCtx: Context, id: string): Promise<unknown>
-}
-
-/** An owned agent whose disposer releases it from the registry. */
-interface OwnedAgent {
-  agent: Agent
-  dispose(): Promise<void>
+/** Minimal face of the `sessions` service: enumerate live sessions. */
+interface SessionService {
+  list(): Session[]
 }
 
 /**
@@ -123,72 +99,40 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(payload)
 }
 
-export function apply(ctx: Context, config: Config = {}): void {
-  // Guaranteed by `inject`: the plugin stays pending until the Web server mounts.
+/** The target of a bridge operation: a live session plus its live agent. */
+interface BridgeTarget {
+  session: Session
+  agent: Agent
+}
+
+export function apply(ctx: Context): void {
   const webServer = ctx.get('webServer') as WebServerService
+  const sessions = ctx.get('sessions') as SessionService
 
-  const sessionId = SessionId(config.sessionId ?? 'dsh-emacs')
-  const cwd = config.cwd ?? process.cwd()
-  const ownedAgents = new Set<OwnedAgent>()
-
-  /** Compose a fresh agent exactly the way the Web gateway does. */
-  async function createAgent(): Promise<OwnedAgent> {
-    const defaultModel = ctx.get('agentDefaultModel') as DefaultModelService | undefined
-    if (defaultModel === undefined) {
-      throw new Error('dsh-bridge: ctx.agentDefaultModel is unavailable')
-    }
-    const selection = defaultModel.currentSelection()
-    const presets = ctx.get('agentPresets') as PresetService | undefined
-
-    const installSelection = (agentCtx: Context): void => {
-      const ref: ModelSelectionRef = {
-        current: { provider: selection.provider, model: selection.model },
-        assembled: undefined,
-      }
-      installModelSelection(agentCtx, ref)
-    }
-
-    let agentPreset: string | undefined
-    let setup: (agentCtx: Context) => Promise<void>
-    if (presets === undefined) {
-      setup = async (agentCtx) => { installSelection(agentCtx) }
-    } else {
-      const resolvedId = (await presets.resolve(config.presetId)).id
-      agentPreset = resolvedId
-      setup = async (agentCtx) => {
-        installSelection(agentCtx)
-        await presets.mount(agentCtx, resolvedId)
+  /**
+   * The live session to target: the most recently active one. Subagent child
+   * sessions are ignored so the bridge follows the top-level conversation the
+   * user is driving, never a background child it spawned. The session's agent
+   * must be live — there is nothing to drive for a session without one.
+   *
+   * @returns the target, or undefined when no live agent-backed top-level
+   *   session exists.
+   */
+  function lastActiveSession(): BridgeTarget | undefined {
+    let best: BridgeTarget | undefined
+    let bestTime = -Infinity
+    for (const session of sessions.list()) {
+      if (session.header.origin === 'subagent') continue
+      const agent = ctx.agents.get(session.id)
+      if (agent === undefined) continue
+      const time = session.events.at(-1)?.time ?? session.header.createdAt
+      if (time > bestTime) {
+        bestTime = time
+        best = { session, agent }
       }
     }
-
-    const handle = await ctx.agents.create({
-      sessionId,
-      agentOptions: { provider: selection.provider, model: selection.model },
-      meta: { cwd, ...(agentPreset === undefined ? {} : { agentPreset }) },
-      setup,
-    })
-    ownedAgents.add(handle)
-    return handle
+    return best
   }
-
-  /** In-flight creation, so concurrent sends share one agent. */
-  let creating: Promise<OwnedAgent> | undefined
-
-  /** The live agent for `sessionId`, creating it on first use. */
-  async function ensureAgent(): Promise<Agent> {
-    const live = ctx.agents.get(sessionId)
-    if (live !== undefined) return live
-    creating ??= createAgent().finally(() => { creating = undefined })
-    return (await creating).agent
-  }
-
-  // Release any agent this plugin created when the plugin unloads;
-  // cordis awaits async disposers, so unload waits for the releases.
-  ctx.effect(() => async () => {
-    const handles = [...ownedAgents]
-    ownedAgents.clear()
-    await Promise.all(handles.map(handle => handle.dispose()))
-  })
 
   // Registered inside an effect so a config hot-reload disposes the route
   // before re-applying — a duplicate (kind, path) registration throws.
@@ -205,24 +149,28 @@ export function apply(ctx: Context, config: Config = {}): void {
             sendJson(res, 400, { error: 'text is required' })
             return
           }
-          const agent = await ensureAgent()
-          agent.followup(createUserMessage({
+          const target = lastActiveSession()
+          if (target === undefined) {
+            sendJson(res, 409, { error: 'no active session' })
+            return
+          }
+          target.agent.followup(createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
           }))
-          sendJson(res, 200, { ok: true, sessionId: String(sessionId) })
+          sendJson(res, 200, { ok: true, sessionId: String(target.session.id) })
         } catch (error: unknown) {
           sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
       if (req.method === 'GET' && pathname === '/dsh-bridge/output') {
-        const agent = ctx.agents.get(sessionId)
-        if (agent === undefined) {
-          sendJson(res, 404, { error: 'no live session', sessionId: String(sessionId) })
+        const target = lastActiveSession()
+        if (target === undefined) {
+          sendJson(res, 404, { error: 'no active session' })
           return
         }
-        sendJson(res, 200, { sessionId: String(sessionId), text: latestAssistantText(agent) })
+        sendJson(res, 200, { sessionId: String(target.session.id), text: latestAssistantText(target.agent) })
         return
       }
       sendJson(res, 404, { error: 'not found' })

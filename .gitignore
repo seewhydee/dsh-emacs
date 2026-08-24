@@ -1,0 +1,13 @@
+# Build output and dependency installs (keep the source; ignore the artifacts).
+# `node_modules` without a trailing slash so it also matches the symlinked
+# dev node_modules (a symlink is not a directory for gitignore matching).
+node_modules
+lib/
+
+# Dependency lockfile: a publishable plugin/library — consumers resolve their
+# own deps and never use a transitive dependency's lockfile.
+pnpm-lock.yaml
+
+# Emacs artifacts.
+.#*
+*~
