@@ -14,24 +14,30 @@ directly into Emacs.  That is handled by Deepseek Harness; Emacs (or
 
 ## Components
 
-- `dsh-plugin/` — `dsh-emacs-bridge`, a DeepSeek Harness host plugin (Cordis id
-  `dsh-bridge`) that registers a loopback HTTP route.
+- `dsh-plugin/` — `dsh-emacs-bridge`, a **dual-face** DeepSeek Harness plugin:
+  - a **host bundle** (Cordis id `dsh-bridge`) that registers the loopback HTTP
+    routes under `/dsh-bridge/`;
+  - a **`dsh.client` browser plugin** (web) that adds the "Send to Emacs"
+    button to assistant messages and applies composer drafts.
 - `emacs/dsh-bridge.el` — an Emacs package connecting to that route.
 
 ## Status
 
-Working prototype.  It currently supports:
+Working prototype.  It supports:
 
 - sending a region or buffer to DSH as a prompt;
+- pushing a region/buffer into the DSH composer as a *draft* (review before
+  submit);
 - fetching the latest assistant reply into an Emacs buffer;
-- listing live and persisted DSH sessions, and choosing which live session
-  the bridge targets (with a per-call override).
+- a "Send to Emacs" button on assistant messages in the web UI, pulled into
+  Emacs via `M-x dsh-bridge-pull-inbox`;
+- listing live and persisted DSH sessions, and choosing which live session the
+  bridge targets (with a per-call override).
 
-Everything else — setting the composer draft instead of auto-submitting (so
-you can review the prompt in DSH before it runs), a `/emacs` edit command, a
-composer button, resuming persisted sessions, live streaming — is a later
-phase.  By default the bridge targets the most recently active DSH session.
-The scope-reducing decisions and the roadmap live in [PLAN.md](PLAN.md).
+Everything else — a `/emacs` edit command, resuming persisted sessions, live
+streaming, per-session transcript buffers — is a later phase.  By default the
+bridge targets the most recently active DSH session.  The scope-reducing
+decisions and the roadmap live in [PLAN.md](PLAN.md).
 
 ## Requirements
 
@@ -47,16 +53,16 @@ The plugin ships as ESM JavaScript built by
 ```sh
 cd dsh-plugin
 pnpm install   # first time only
-pnpm build     # emits lib/index.js
+pnpm build     # emits lib/index.js (host) + lib/client.js (browser)
 ```
 
 Note: with the dev setup where `dsh-plugin/node_modules` is a symlink into
 the harness checkout, `pnpm build` may abort with "Aborted removal of modules
 directory due to no TTY" — pnpm wants to purge the symlinked modules before
-running scripts.  Invoke the builder directly instead:
+running scripts.  Invoke the builders directly instead (both halves):
 
 ```sh
-./node_modules/.bin/tsdown
+./node_modules/.bin/tsdown && ./node_modules/.bin/tsdown --config tsdown.client.config.ts
 ```
 
 ## Install the plugin into dsh
@@ -102,6 +108,14 @@ pnpm dsh web --dump-config | grep -A2 dsh-bridge     # source checkout
 Set `dsh-bridge-url` if your `dsh web` binds a non-default port (default
 `http://127.0.0.1:3080/dsh-bridge`).
 
+## Authentication
+
+Every `/dsh-bridge` route requires a shared bearer token.  The plugin keeps it
+at `~/.dsh/dsh-bridge-token` (or `$DSH_HOME/dsh-bridge-token`) and generates it
+on first use.  Emacs reads that same file; the browser plugin fetches it
+automatically from the loopback-only `GET /dsh-bridge/token` route (peer- and
+origin-fenced), so there is no manual pairing step.
+
 ## Usage
 
 From Emacs:
@@ -111,8 +125,10 @@ From Emacs:
 - `M-x dsh-bridge-send-draft-region` / `M-x dsh-bridge-send-draft-buffer` —
   push the region/buffer into the DSH composer as a *draft*: the text lands in
   the composer's text box for review but is not submitted (`send` submits
-  immediately).  Requires the DSH web UI to be open in a browser, and targets
-  the session that browser tab is viewing.
+  immediately).  Requires the DSH web UI to be open in a browser with the
+  target session loaded; the draft goes to the bridge's target session
+  (selected or last-active), and a 409 is reported when no browser client is
+  connected at all.
 - `M-x dsh-bridge-pull-inbox` — pull messages sent from DSH (e.g. via the
   "Send to Emacs" button on assistant messages in the web UI) into
   `*dsh-bridge-inbox*`.

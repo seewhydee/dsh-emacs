@@ -5,11 +5,12 @@ session. The DSH text window is small and typing-poor; Emacs is a full editor
 but lacks DSH's live agent. This project lets text move in both directions
 without window-switching and copy-paste.
 
-Status: Phase 2 (auth token + robustness + unit tests) is implemented and in
-review — every `/dsh-bridge` route now requires `Authorization: Bearer`, the
-subagent filter is tightened, and both the plugin (Vitest) and the Emacs
-package (ERT) have unit tests. The next milestone is Phase 3 — see the
-[Roadmap](#roadmap-phased).
+Status: Phase 3 (client plugin: "Send to Emacs" button + composer draft push)
+is implemented and in review — the bridge is the dual-face package (host bundle
+plus `dsh.client` browser plugin), the button and inbox/outbox are working, and
+the token is auto-vended to the browser (no manual pairing). Unit tests cover
+the host (Vitest) and the Emacs package (ERT). The next milestone is Phase 4 —
+see the [Roadmap](#roadmap-phased).
 
 ## Names (locked)
 
@@ -38,12 +39,13 @@ Two halves, one shared concept "bridge".
   inside the `dsh web` Node process, so it can drive `ctx.agents`, serve an
   HTTP route, and read `session/event`. It shells out to `emacsclient` for the
   (later) edit flow.
-- **DSH client plugin** (Phase 3, same npm package): a `dsh.client` browser
+- **DSH client plugin** (same npm package, implemented): a `dsh.client` browser
   plugin for the DSH-side UI affordances (message button, composer draft).
 - **Emacs package** (`emacs/`): `dsh-bridge.el`, talking to the plugin over
   loopback HTTP.
-- **Transport:** loopback HTTP both directions, plus (Phase 3+) a plugin-owned
-  SSE channel for host→client and host→Emacs notification push.
+- **Transport:** loopback HTTP both directions, plus a plugin-owned SSE channel
+  for host→client (the composer-draft push, implemented). Host→Emacs
+  notification push is Phase 5.
 
 ### DSH seams (verified against `deepseek-harness` @ 0.1.1-rc.2)
 
@@ -116,7 +118,7 @@ dsh-emacs/
     tsdown.config.ts     # src/index.ts -> lib/index.js (ESM)
     cordis.patch.yml     # bundle patch: inserts the dsh-bridge row
     src/index.ts         # host function plugin
-    src/client/          # (Phase 3) dsh.client browser plugin
+    src/client/          # dsh.client browser plugin (implemented: button + draft)
     lib/                 # build output (gitignored)
     node_modules/        # dev symlink to the checkout's node_modules (gitignored)
   emacs/
@@ -125,11 +127,19 @@ dsh-emacs/
 
 ## Build & mount (done)
 
-- **Build:** `cd dsh-plugin && pnpm install && pnpm build` → tsdown emits ESM
-  `lib/index.js`. Needs `fixedExtension: false` with `"type": "module"` (the node
-  default would emit `.mjs`). The dev `node_modules` is a gitignored symlink to
-  the harness checkout's `node_modules`.
-- **Mount shape:** a bundle — `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`.
+- **Build:** `cd dsh-plugin && pnpm run build` → tsdown emits ESM `lib/index.js`
+  (host bundle) and CJS `lib/client.js` (client bundle, `tsdown.client.config.ts`).
+  The host half needs `fixedExtension: false` with `"type": "module"` (the node
+  default would emit `.mjs`); the client half pins `lib/client.js` itself. The
+  dev `node_modules` is a gitignored symlink to the harness checkout's
+  `node_modules`.
+- **Dev loop:** `./node_modules/.bin/tsdown --watch` and
+  `./node_modules/.bin/tsdown --config tsdown.client.config.ts --watch` rebuild
+  on save; the harness's `client-hmr` stat-polls each row's `clientPath` and
+  reloads the browser fiber, so client changes hot-reload. Host plugin code and
+  manifest changes still need a `dsh web` restart.
+- **Mount shape:** dual-face — `"dsh": { "bundle": { "patch": "./cordis.patch.yml" },
+  "client": { "platform": "web" } }` and `exports["./client"]`.
   The patch inserts `id: dsh-bridge` / `name: dsh-emacs-bridge`; `id` is the
   patch/HMR target, `name` the module specifier, `export const name` the Cordis
   identity. Never `export default`.
@@ -140,10 +150,11 @@ dsh-emacs/
   injection breaks); `@deepseek-ai/dsh-*` runtime imports are peers pinned to the
   target dsh version (`^0.1.1-rc.2` here); type-only imports are devDependencies.
   The repo is pre-release with no compatibility promise — re-verify the seams
-  table above on any dsh version bump.
+  table above and the client artifact contract (`tsdown.client.ts`) on any dsh
+  version bump (the contract is the most likely thing to drift).
 - **Restart discipline:** edits to `cordis.patch.yml` hot-reload; bundle
-  membership, plugin code, and client-bundle changes require a `dsh web`
-  restart.
+  membership, host plugin code, and manifest (`dsh.client`) changes require a
+  `dsh web` restart.
 
 ## Roadmap (phased)
 
@@ -208,28 +219,34 @@ Every later feature needs session ids, so this came first.
   parent owns them, matching `hasApiRemoteSubagentOwner`); surface HTTP status
   codes in Emacs error messages; handle `url-retrieve` timeouts.
 
-### Phase 3 — Client plugin: "Send to Emacs" button and composer draft
+### Phase 3 — Client plugin: "Send to Emacs" button and composer draft (implemented)
 
-The big rock. Splits into independently landable pieces:
+The big rock. Split into independently landable pieces, all landed:
 
 1. **Build plumbing:** hand-rolled tsdown client-bundle config emitting the
    factory-form `client.js` (banner/footer/externals per
    `packages/client/tsdown.client.ts`); `dsh.client` + `exports["./client"]`
-   in `package.json`. Verify the bundle loads (it boots loud on failure —
-   `MissingClientBundleError`).
+   in `package.json`. The bundle loads (it boots loud on failure —
+   `MissingClientBundleError`); verified with a hello-world spike.
 2. **Outbox + button:** host `POST /dsh-bridge/outbox` (deposit, with
    `sessionId` and a source label), `GET /dsh-bridge/outbox` + ack (collect).
    Client plugin registers a "Send to Emacs" button into
    `conversation.chat.assistant-actions` (copy the `ui-message-feedback`
    pattern; the slot injects `messageId`, and the component reads the message
-   text from the conversation snapshot). Emacs: `dsh-bridge-pull-inbox`
-   collects into a buffer.
+   text from the conversation snapshot — a GNU Emacs icon, localized via
+   `zh`/`en` dictionaries). Emacs: `dsh-bridge-pull-inbox` collects into a
+   buffer.
 3. **Composer draft push:** host SSE route (`GET /dsh-bridge/events`,
-   HMR-style fan-out) + `POST /dsh-bridge/draft { text, sessionId? }`; client
-   plugin subscribes and calls `SessionInput.setDraft` for the target session
-   scope. Emacs: `dsh-bridge-send-draft` — text lands in the DSH composer for
-   review instead of auto-submitting. (`POST /send` keeps its submit
-   semantics.)
+   HMR-style fan-out, `?token=` auth) + `POST /dsh-bridge/draft { text,
+   sessionId? }` (bearer; 409 `no client connected` when nothing is
+   subscribed); client plugin subscribes and calls `SessionInput.setDraft` for
+   the target session scope. Emacs: `dsh-bridge-send-draft` — text lands in the
+   DSH composer for review instead of auto-submitting. (`POST /send` keeps its
+   submit semantics.)
+4. **Token delivery:** the browser has no file access, so `GET /dsh-bridge/token`
+   vends the token over a peer- and origin-fenced route; the client auto-fetches
+   it (Option B evolved to auto-vend — no manual paste). Emacs reads the token
+   file directly.
 
 ### Phase 4 — `/emacs edit` flow
 
