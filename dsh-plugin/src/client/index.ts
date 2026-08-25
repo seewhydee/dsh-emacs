@@ -19,9 +19,13 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: pulls the conversation SlotMap merge so the assistant-actions
 // seat is known to the slot registry.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { en, zh } from './locales.ts'
 import { SendToEmacs } from './SendToEmacs.tsx'
 
-export const inject = ['slots']
+/** Locale namespace owned by this plugin (its `t` seat on the assistant-actions entry). */
+const LOCALE_NS = 'dsh-emacs-bridge'
+
+export const inject = ['slots', 'locale']
 
 /** In-memory token cache, so the vend fetch happens at most once per page. */
 let cachedToken: string | null = null
@@ -90,11 +94,13 @@ async function depositOutbox(sessionId: string, text: string): Promise<void> {
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => ctx.locale.register(LOCALE_NS, { zh, en }))
   ctx.slots.inject('conversation.chat.assistant-actions', () => {
     const dispose = ctx.slots.register({
       name: 'conversation.chat.assistant-actions',
       id: 'send-to-emacs',
       order: 9,
+      locale: LOCALE_NS,
       inject: (sessionId: string) => ({
         deposit: (text: string) => depositOutbox(sessionId, text),
       }),

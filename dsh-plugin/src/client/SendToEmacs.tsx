@@ -17,8 +17,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import { useCallback, useState } from 'react'
-import { IconCheckOutline16, IconSendOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
+import { IconCheckOutline16, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { PropsLocale, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from './locales.ts'
+import { EmacsMiniIcon } from './EmacsMiniIcon.tsx'
 
 /** Minimal structural face of an assistant content block. */
 interface AssistantBlockLike {
@@ -68,11 +70,12 @@ function textForMessage(snapshot: ChatSnapshotLike, messageId: string): string {
   return ''
 }
 
-/** Props handed to the slot occupant: owner id, the session snapshot hook, and the face carrying the deposit verb. */
+/** Props handed to the slot occupant: owner id, the session snapshot hook, the deposit verb, and the locale seat. */
 interface SendToEmacsProps {
   messageId: string
   useSession: SnapshotSelectorHook<ChatSnapshotLike>
   deposit: (text: string) => Promise<void>
+  t: PropsLocale<'dsh-emacs-bridge'>['t']
 }
 
 /**
@@ -80,7 +83,7 @@ interface SendToEmacsProps {
  * bridge outbox. A brief check swap confirms success; a failure surfaces a
  * short tooltip message and leaves the button usable.
  */
-export function SendToEmacs({ messageId, useSession, deposit }: SendToEmacsProps) {
+export function SendToEmacs({ messageId, useSession, deposit, t }: SendToEmacsProps) {
   const text = useSession(snapshot => textForMessage(snapshot, messageId))
   const [sent, setSent] = useState(false)
   const [pending, setPending] = useState(false)
@@ -100,12 +103,12 @@ export function SendToEmacs({ messageId, useSession, deposit }: SendToEmacsProps
         setFailure(error instanceof Error ? error.message : String(error))
       })
   }, [pending, text, deposit])
-  const label = failure ?? (sent ? '已发送到 Emacs' : '发送到 Emacs')
+  const label = failure ?? (sent ? t('sentToEmacs') : t('sendToEmacs'))
   return (
     <Tooltip label={label} side="bottom">
       <button
         type="button"
-        aria-label="发送到 Emacs"
+        aria-label={t('sendToEmacs')}
         disabled={pending}
         onClick={onClick}
         style={{
@@ -114,7 +117,7 @@ export function SendToEmacs({ messageId, useSession, deposit }: SendToEmacsProps
           cursor: pending ? 'default' : 'pointer', color: 'inherit',
         }}
       >
-        {sent ? <IconCheckOutline16 /> : <IconSendOutline16 />}
+        {sent ? <IconCheckOutline16 /> : <EmacsMiniIcon />}
       </button>
     </Tooltip>
   )
