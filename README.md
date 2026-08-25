@@ -1,7 +1,7 @@
 # dsh-emacs
 
-A two-way bridge between an Emacs session and a running
-[Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness)
+A two-way bridge between [Emacs](https://www.gnu.org/software/emacs/)
+and a [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness) 
 session.  The bridge moves text from Emacs to DeepSeek Harness, and
 vice versa, over loopback HTTP.  This lets you type in Emacs and read
 DSH's replies without copy-pasting, while also avoiding streaming
@@ -24,7 +24,7 @@ Currently in working protoype stage.
 
 - A running `dsh` (the `web` profile).
 - Node.js and `pnpm` to build the plugin.
-- Emacs 29 or later for the Emacs package.
+- Emacs 29 or later.
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
 
 ## Build the plugin
