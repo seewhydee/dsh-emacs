@@ -1,4 +1,4 @@
-# dsh-emacs
+# dsh-emacs-bridge
 
 A two-way bridge between [Emacs](https://www.gnu.org/software/emacs/)
 and a [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness) 
