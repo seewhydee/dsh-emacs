@@ -14,8 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
-// Routes (all require `Authorization: Bearer <token>`; see logic.ts for the
-// pure decision logic this wiring delegates to):
+// Routes (all require `Authorization: Bearer <token>` — except the token-vend
+// route, which is peer- and origin-fenced; see logic.ts for the pure decision
+// logic):
+//   GET  /dsh-bridge/token                          -> vend the token (loopback-fenced)
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
@@ -36,11 +38,13 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import { Outbox } from './outbox.ts'
 import {
+  isLoopbackAddress,
   isSubagentChild,
   latestAssistantText,
   mergeSessionRows,
   parseBearerAuthorization,
   resolveTargetId,
+  tokenRequestsSameOrigin,
   tokensEqual,
   type LiveSessionLike,
   type ResolveTargetResult,
@@ -227,13 +231,27 @@ export function apply(ctx: Context): void {
     kind: 'prefix',
     path: '/dsh-bridge',
     handler: async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const pathname = url.pathname
+
+      // The browser legitimately has no bearer token on first load, so this ONE
+      // route is fenced by peer address and origin instead: it hands out the
+      // token only to a loopback peer (unforgeable, unlike headers) whose
+      // Host/Origin also name loopback (see tokenRequestsSameOrigin).
+      if (req.method === 'GET' && pathname === '/dsh-bridge/token') {
+        if (!isLoopbackAddress(req.socket.remoteAddress)
+          || !tokenRequestsSameOrigin(req.headers.host, req.headers.origin)) {
+          sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        sendJson(res, 200, { token })
+        return
+      }
+
       if (!authorized(req)) {
         sendJson(res, 401, { error: 'unauthorized' })
         return
       }
-
-      const url = new URL(req.url ?? '/', 'http://localhost')
-      const pathname = url.pathname
 
       if (req.method === 'GET' && pathname === '/dsh-bridge/sessions') {
         try {

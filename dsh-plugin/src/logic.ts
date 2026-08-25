@@ -168,3 +168,59 @@ export function tokensEqual(expected: string, provided: string): boolean {
   if (a.length !== b.length) return false
   return timingSafeEqual(a, b)
 }
+
+/** The hostname part of a Host header value, handling an IPv6-bracketed port. */
+export function hostnameOf(host: string): string {
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']')
+    return end === -1 ? host : host.slice(1, end)
+  }
+  const colon = host.lastIndexOf(':')
+  return colon === -1 ? host : host.slice(0, colon)
+}
+
+/** Whether a hostname names the loopback interface. */
+export function isLoopbackHostname(name: string): boolean {
+  return name === 'localhost' || name === '127.0.0.1' || name === '::1'
+}
+
+/**
+ * Whether a socket peer address names the loopback interface (IPv4 127/8,
+ * `::1`, or IPv4-mapped `::ffff:127/8`). Unlike the Host header, a TCP peer
+ * address cannot be forged by a remote client, so this check keeps the
+ * token-vend route loopback-only even if the server is configured to bind a
+ * non-loopback interface.
+ */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (address === undefined) return false
+  const unmapped = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address
+  return unmapped === '::1' || unmapped.startsWith('127.')
+}
+
+/** Whether an Origin value belongs to the loopback interface. */
+export function isLoopbackOrigin(origin: string): boolean {
+  let url: URL
+  try {
+    url = new URL(origin)
+  } catch {
+    return false
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  return isLoopbackHostname(url.hostname)
+}
+
+/**
+ * Whether a token-vend request proves it came from the web UI's own origin:
+ * the Host must name loopback (defeating DNS-rebinding), and a present Origin
+ * must too (defeating a cross-origin page). The browser legitimately lacks the
+ * bearer token on first load, so this fence stands in for it on that one
+ * route. Headers alone cannot prove the peer is local (a remote client can
+ * forge Host when the server binds a non-loopback interface), so callers must
+ * combine this with `isLoopbackAddress(req.socket.remoteAddress)`.
+ */
+export function tokenRequestsSameOrigin(host: string | undefined, origin: string | undefined): boolean {
+  if (host === undefined) return false
+  if (!isLoopbackHostname(hostnameOf(host))) return false
+  if (origin !== undefined && !isLoopbackOrigin(origin)) return false
+  return true
+}

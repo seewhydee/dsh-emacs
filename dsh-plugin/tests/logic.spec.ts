@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  hostnameOf,
+  isLoopbackAddress,
+  isLoopbackHostname,
+  isLoopbackOrigin,
   isSubagentChild,
   latestAssistantText,
   mergeSessionRows,
   parseBearerAuthorization,
   resolveTargetId,
+  tokenRequestsSameOrigin,
   tokensEqual,
   type LiveSessionLike,
   type MessageLike,
@@ -171,5 +176,55 @@ describe('tokensEqual', () => {
 
   it('rejects differing lengths without throwing', () => {
     expect(tokensEqual('secret', 'x')).toBe(false)
+  })
+})
+
+describe('token-vend origin fence', () => {
+  it('strips the port from a Host header, handling IPv6 brackets', () => {
+    expect(hostnameOf('localhost:3080')).toBe('localhost')
+    expect(hostnameOf('127.0.0.1:3080')).toBe('127.0.0.1')
+    expect(hostnameOf('[::1]:3080')).toBe('::1')
+    expect(hostnameOf('localhost')).toBe('localhost')
+  })
+
+  it('recognises loopback hostnames', () => {
+    expect(isLoopbackHostname('localhost')).toBe(true)
+    expect(isLoopbackHostname('127.0.0.1')).toBe(true)
+    expect(isLoopbackHostname('::1')).toBe(true)
+    expect(isLoopbackHostname('192.168.1.5')).toBe(false)
+  })
+
+  it('recognises loopback origins', () => {
+    expect(isLoopbackOrigin('http://localhost:3080')).toBe(true)
+    expect(isLoopbackOrigin('http://127.0.0.1:3080')).toBe(true)
+    expect(isLoopbackOrigin('https://evil.com')).toBe(false)
+  })
+
+  it('accepts a same-origin request', () => {
+    expect(tokenRequestsSameOrigin('localhost:3080', undefined)).toBe(true)
+    expect(tokenRequestsSameOrigin('127.0.0.1:8080', 'http://127.0.0.1:8080')).toBe(true)
+  })
+
+  it('rejects a DNS-rebinding Host and a cross-origin page', () => {
+    expect(tokenRequestsSameOrigin('evil.com', undefined)).toBe(false)
+    expect(tokenRequestsSameOrigin('localhost:3080', 'http://evil.com')).toBe(false)
+  })
+
+  it('rejects a missing Host', () => {
+    expect(tokenRequestsSameOrigin(undefined, undefined)).toBe(false)
+  })
+
+  it('recognises loopback socket peer addresses, including IPv4-mapped', () => {
+    expect(isLoopbackAddress('127.0.0.1')).toBe(true)
+    expect(isLoopbackAddress('127.0.0.2')).toBe(true)
+    expect(isLoopbackAddress('::1')).toBe(true)
+    expect(isLoopbackAddress('::ffff:127.0.0.1')).toBe(true)
+  })
+
+  it('rejects non-loopback and missing peer addresses', () => {
+    expect(isLoopbackAddress('192.168.1.5')).toBe(false)
+    expect(isLoopbackAddress('::ffff:192.168.1.5')).toBe(false)
+    expect(isLoopbackAddress('2001:db8::1')).toBe(false)
+    expect(isLoopbackAddress(undefined)).toBe(false)
   })
 })
