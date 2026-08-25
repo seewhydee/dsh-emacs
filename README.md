@@ -108,6 +108,14 @@ From Emacs:
 
 - `M-x dsh-bridge-send-region` — send the selected region to DSH as a prompt.
 - `M-x dsh-bridge-send-buffer` — send the whole buffer.
+- `M-x dsh-bridge-send-draft-region` / `M-x dsh-bridge-send-draft-buffer` —
+  push the region/buffer into the DSH composer as a *draft*: the text lands in
+  the composer's text box for review but is not submitted (`send` submits
+  immediately).  Requires the DSH web UI to be open in a browser, and targets
+  the session that browser tab is viewing.
+- `M-x dsh-bridge-pull-inbox` — pull messages sent from DSH (e.g. via the
+  "Send to Emacs" button on assistant messages in the web UI) into
+  `*dsh-bridge-inbox*`.
 - `M-x dsh-bridge-get-output` — fetch the latest DSH assistant reply into
   `*dsh-bridge-output*`.
 - `M-x dsh-bridge-list-sessions` — browse live and saved DSH sessions in a

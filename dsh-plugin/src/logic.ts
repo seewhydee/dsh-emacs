@@ -224,3 +224,11 @@ export function tokenRequestsSameOrigin(host: string | undefined, origin: string
   if (origin !== undefined && !isLoopbackOrigin(origin)) return false
   return true
 }
+
+/**
+ * One SSE `data:` frame for a composer-draft push. The payload names the target
+ * session so the browser routes the draft to the right composer scope.
+ */
+export function draftMessage(sessionId: string, text: string): string {
+  return `data: ${JSON.stringify({ kind: 'draft', sessionId, text })}\n\n`
+}

@@ -87,12 +87,21 @@ The url-http response buffer is unibyte, so decode the body as UTF-8."
       "")))
 
 (defun dsh-bridge--token ()
-  "Return the bridge bearer token, or nil when none is available."
-  (or dsh-bridge-token
-      (and (file-readable-p dsh-bridge-token-file)
-           (with-temp-buffer
-             (insert-file-contents dsh-bridge-token-file)
-             (string-trim (buffer-string))))))
+  "Return the bridge bearer token as a unibyte string, or nil if none.
+
+`insert-file-contents' yields a multibyte string, and a multibyte (even
+pure-ASCII) Authorization header value poisons url-http's request
+concatenation: when the request body then contains non-ASCII bytes, the
+request string becomes multibyte and url-http errors with \"Multibyte
+text in HTTP request\" (bug#23750) in the process sentinel — surfacing
+only as a request timeout.  The token is hex, so coercing to unibyte is
+lossless."
+  (let ((token (or dsh-bridge-token
+                   (and (file-readable-p dsh-bridge-token-file)
+                        (with-temp-buffer
+                          (insert-file-contents dsh-bridge-token-file)
+                          (string-trim (buffer-string)))))))
+    (and token (string-to-unibyte token))))
 
 (defun dsh-bridge--extra-headers (payload)
   "Return the HTTP header alist for a request with PAYLOAD (nil for no body).
@@ -123,42 +132,32 @@ nil), and ALIST the decoded JSON body (or nil)."
 (defun dsh-bridge--call (method path payload callback)
   "Perform METHOD request to PATH under `dsh-bridge-url'.
 PAYLOAD is an alist encoded as JSON (for POST) or nil (for GET).
-CALLBACK is invoked with (status body-string http-status), where STATUS
-is the url-retrieve status plist; a `:error' entry reports a transport
-failure, including expiry of `dsh-bridge-timeout'."
+CALLBACK is invoked with (status body-string HTTP-STATUS), where STATUS is nil
+on a completed request (whatever the HTTP status) or an `:error' plist on a
+transport failure/timeout.  Uses `url-retrieve-synchronously': a request here
+is a short loopback round-trip, and the async `url-retrieve' path reports
+process-sentinel failures (such as the bug#23750 \"Multibyte text in HTTP
+request\" error) only via `message', which made them hard to diagnose."
   (let ((url-request-method method)
         (url-request-data
          (and payload (encode-coding-string (json-encode payload) 'utf-8)))
         (url-request-extra-headers (dsh-bridge--extra-headers payload)))
-    (let* ((finished nil)
-           (finish (lambda (status body http-status)
-                     (unless finished
-                       (setq finished t)
-                       (funcall callback status body http-status))))
-           (retrieval-buffer
-            (url-retrieve (concat dsh-bridge-url path)
-                          (lambda (status)
-                            (let ((http-status (and (boundp 'url-http-response-status)
-                                                    url-http-response-status))
-                                  (body (dsh-bridge--response-body (current-buffer))))
-                              (kill-buffer (current-buffer))
-                              (funcall finish status body http-status)))
-                          nil t)))
-      (when (and retrieval-buffer
-                 (numberp dsh-bridge-timeout)
-                 (> dsh-bridge-timeout 0))
-        (run-with-timer
-         dsh-bridge-timeout nil
-         (lambda ()
-           (unless finished
-             ;; Report before tearing down: deleting the process wakes
-             ;; url-http's own failure callback, which `finish' then absorbs.
-             (funcall finish '(:error "request timed out") nil nil)
-             (when (buffer-live-p retrieval-buffer)
-               (let ((proc (get-buffer-process retrieval-buffer)))
-                 (when proc
-                   (delete-process proc))
-                 (kill-buffer retrieval-buffer))))))))))
+    (let ((buf nil)
+          (err nil))
+      (condition-case e
+          (setq buf (url-retrieve-synchronously (concat dsh-bridge-url path)
+                                                t nil dsh-bridge-timeout))
+        (error (setq err e)))
+      (cond
+       (err (funcall callback (list :error (error-message-string err)) nil nil))
+       ((null buf) (funcall callback '(:error "request timed out") nil nil))
+       (t
+        (let ((http-status (with-current-buffer buf
+                             (and (boundp 'url-http-response-status)
+                                  url-http-response-status)))
+              (body (dsh-bridge--response-body buf)))
+          (kill-buffer buf)
+          (funcall callback nil body http-status)))))))
 
 (defun dsh-bridge-send-text (text)
   "Send TEXT to the DSH session as a prompt."
@@ -374,6 +373,36 @@ and the ack redelivers them on the next pull (duplicates, not loss)."
                  (if (= (length entries) 1) "" "s")
                  (if overflowed " (overflow — some dropped)" ""))
         (when entries (pop-to-buffer "*dsh-bridge-inbox*")))))))
+
+(defun dsh-bridge-send-draft (text)
+  "Send TEXT to the DSH composer as a draft (not submitted)."
+  (let ((payload `((text . ,text)
+                   ,@(when dsh-bridge-target-session
+                       (list (cons 'sessionId dsh-bridge-target-session))))))
+    (dsh-bridge--call "POST" "/draft" payload
+      (lambda (status body http-status)
+        (let* ((alist (condition-case nil
+                          (json-parse-string body :object-type 'alist)
+                        (error nil)))
+               (error (dsh-bridge--error-message status http-status alist)))
+          (cond
+           (error (message "dsh-bridge: %s" error))
+           ((null alist)
+            (message "dsh-bridge: unreadable response: %s" body))
+           (t (message "dsh-bridge: draft pushed to %s"
+                       (or (alist-get 'sessionId alist) "the active session")))))))))
+
+;;;###autoload
+(defun dsh-bridge-send-draft-region (beg end)
+  "Send the region to DSH as a composer draft."
+  (interactive "r")
+  (dsh-bridge-send-draft (buffer-substring-no-properties beg end)))
+
+;;;###autoload
+(defun dsh-bridge-send-draft-buffer ()
+  "Send the whole buffer to DSH as a composer draft."
+  (interactive)
+  (dsh-bridge-send-draft (buffer-substring-no-properties (point-min) (point-max))))
 
 (provide 'dsh-bridge)
 ;;; dsh-bridge.el ends here

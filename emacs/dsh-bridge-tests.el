@@ -50,6 +50,15 @@
         (dsh-bridge-token-file "/nonexistent/dsh-bridge-token"))
     (should (equal (dsh-bridge--extra-headers nil) nil))))
 
+(ert-deftest dsh-bridge-extra-headers-token-is-unibyte ()
+  ;; A multibyte (even pure-ASCII) token header value poisons url-http's
+  ;; request concatenation: a body containing non-ASCII bytes then fails
+  ;; with "Multibyte text in HTTP request" (bug#23750).
+  (let ((dsh-bridge-token (string-to-multibyte "secret")))
+    (dolist (pair (dsh-bridge--extra-headers '((text . "x"))))
+      (should-not (multibyte-string-p (car pair)))
+      (should-not (multibyte-string-p (cdr pair))))))
+
 (ert-deftest dsh-bridge-error-message-http-status ()
   (should (equal (dsh-bridge--error-message nil 401 '((error . "unauthorized")))
                  "HTTP 401: unauthorized")))
@@ -125,6 +134,19 @@
                               (with-current-buffer "*dsh-bridge-inbox*"
                                 (buffer-string))))
       (should (equal acked-payload '((ids . ("e1"))))))))
+
+(ert-deftest dsh-bridge-send-draft-posts-to-draft ()
+  "send-draft POSTs the text (and the pinned session) to /draft."
+  (let ((captured nil)
+        (dsh-bridge-target-session "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (method path payload _callback)
+                 (setq captured (list method path payload)))))
+      (dsh-bridge-send-draft "hello"))
+    (should (equal (car captured) "POST"))
+    (should (equal (cadr captured) "/draft"))
+    (should (equal (cdr (assoc 'text (caddr captured))) "hello"))
+    (should (equal (cdr (assoc 'sessionId (caddr captured))) "s1"))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

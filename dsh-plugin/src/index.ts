@@ -15,14 +15,15 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
 // Routes (all require `Authorization: Bearer <token>` — except the token-vend
-// route, which is peer- and origin-fenced; see logic.ts for the pure decision
-// logic):
+// and browser-SSE routes; see logic.ts for the pure decision logic):
 //   GET  /dsh-bridge/token                          -> vend the token (loopback-fenced)
+//   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
 //   POST /dsh-bridge/select { sessionId | null }  -> pin the target session
 //   GET  /dsh-bridge/current                      -> the pinned target (or null)
+//   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { text, sessionId?, source? } -> deposit an entry
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
@@ -38,6 +39,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import { Outbox } from './outbox.ts'
 import {
+  draftMessage,
   isLoopbackAddress,
   isSubagentChild,
   latestAssistantText,
@@ -153,6 +155,9 @@ export function apply(ctx: Context): void {
   /** DSH→Emacs inbox, bounded and acked by Emacs after a successful insert. */
   const outbox = new Outbox()
 
+  /** Browser EventSource clients subscribed to the composer-draft push. */
+  const sseClients = new Set<ServerResponse>()
+
   /** The session id pinned by `/select`; undefined means last-active. */
   let selectedSessionId: string | undefined
 
@@ -248,6 +253,25 @@ export function apply(ctx: Context): void {
         return
       }
 
+      // Browser-facing SSE for the composer-draft push. EventSource cannot set
+      // headers, so it authenticates with the vended token as a query param.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/events') {
+        const queryToken = url.searchParams.get('token')
+        if (!(queryToken !== null && tokensEqual(token, queryToken))) {
+          sendJson(res, 401, { error: 'unauthorized' })
+          return
+        }
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        })
+        res.write('retry: 5000\n\n')
+        sseClients.add(res)
+        req.on('close', () => { sseClients.delete(res) })
+        return
+      }
+
       if (!authorized(req)) {
         sendJson(res, 401, { error: 'unauthorized' })
         return
@@ -268,6 +292,42 @@ export function apply(ctx: Context): void {
           selectedSessionId = undefined
         }
         sendJson(res, 200, { sessionId: selectedSessionId ?? null })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/draft') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown; text?: unknown } | undefined
+          const text = typeof body?.text === 'string' ? body.text : ''
+          if (text.trim() === '') {
+            sendJson(res, 400, { error: 'text is required' })
+            return
+          }
+          let explicitId: string | undefined
+          if (body?.sessionId !== undefined && body.sessionId !== null) {
+            if (typeof body.sessionId !== 'string') {
+              sendJson(res, 400, { error: 'sessionId must be a string' })
+              return
+            }
+            explicitId = body.sessionId
+          }
+          const result = resolveTarget(explicitId)
+          if (result.kind === 'error') {
+            sendJson(res, result.status, { error: result.message })
+            return
+          }
+          if (sseClients.size === 0) {
+            sendJson(res, 409, { error: 'no client connected' })
+            return
+          }
+          const event = draftMessage(result.id, text)
+          for (const client of [...sseClients]) {
+            try { client.write(event) } catch { sseClients.delete(client) }
+          }
+          sendJson(res, 200, { ok: true, sessionId: result.id })
+        } catch (error: unknown) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
         return
       }
 

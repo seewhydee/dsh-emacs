@@ -25,7 +25,22 @@ import { SendToEmacs } from './SendToEmacs.tsx'
 /** Locale namespace owned by this plugin (its `t` seat on the assistant-actions entry). */
 const LOCALE_NS = 'dsh-emacs-bridge'
 
-export const inject = ['slots', 'locale']
+export const inject = ['slots', 'locale', 'sessions']
+
+/** Minimal face of the session-scoped context, enough to reach the conversation service. */
+interface SessionScopeCtx {
+  get(name: string): unknown
+}
+
+/** Minimal face of the client sessions service used to reach a session's scope. */
+interface SessionsService {
+  scope(sessionId: string): SessionScopeCtx | undefined
+}
+
+/** Minimal face of the scoped conversation service, enough to set a composer draft. */
+interface ConversationService {
+  input: { for(ctx: SessionScopeCtx): { setDraft(text: string): void } }
+}
 
 /** In-memory token cache, so the vend fetch happens at most once per page. */
 let cachedToken: string | null = null
@@ -89,6 +104,45 @@ async function depositOutbox(sessionId: string, text: string): Promise<void> {
   throw new Error('HTTP 401')
 }
 
+/** The live EventSource, so an HMR reload can drop the previous one. */
+let draftSource: EventSource | null = null
+
+/** Push one draft onto a session's composer, if that session is loaded in the browser. */
+function applyDraft(ctx: ClientContext, sessionId: string, text: string): void {
+  const actx = (ctx.get('sessions') as SessionsService).scope(sessionId)
+  if (actx === undefined) return
+  const conversation = actx.get('conversation') as ConversationService | undefined
+  if (conversation === undefined) return
+  conversation.input.for(actx).setDraft(text)
+}
+
+/** Subscribe to the composer-draft SSE stream and apply drafts to the target session. */
+async function connectDraftStream(ctx: ClientContext): Promise<void> {
+  let token: string
+  try {
+    token = await getToken()
+  } catch (error) {
+    // No token, no stream — the draft push stays unavailable until a vend
+    // succeeds. Fire-and-forget.
+    // eslint-disable-next-line no-console
+    console.error('[dsh-bridge] draft stream unavailable', error)
+    return
+  }
+  draftSource?.close()
+  const source = new EventSource(`${location.origin}/dsh-bridge/events?token=${encodeURIComponent(token)}`)
+  draftSource = source
+  source.addEventListener('message', (event: MessageEvent<string>) => {
+    let payload: { kind?: unknown; sessionId?: unknown; text?: unknown }
+    try {
+      payload = JSON.parse(event.data) as typeof payload
+    } catch {
+      return
+    }
+    if (payload.kind !== 'draft' || typeof payload.sessionId !== 'string' || typeof payload.text !== 'string') return
+    applyDraft(ctx, payload.sessionId, payload.text)
+  })
+}
+
 /**
  * Client plugin body: register the per-message "Send to Emacs" action.
  * @param ctx - client root context.
@@ -109,4 +163,5 @@ export function apply(ctx: ClientContext): void {
       dispose()
     }
   })
+  void connectDraftStream(ctx)
 }

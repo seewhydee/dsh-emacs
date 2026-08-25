@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  draftMessage,
   hostnameOf,
   isLoopbackAddress,
   isLoopbackHostname,
@@ -226,5 +227,13 @@ describe('token-vend origin fence', () => {
     expect(isLoopbackAddress('::ffff:192.168.1.5')).toBe(false)
     expect(isLoopbackAddress('2001:db8::1')).toBe(false)
     expect(isLoopbackAddress(undefined)).toBe(false)
+  })
+})
+
+describe('draftMessage', () => {
+  it('emits one SSE data frame with the draft payload', () => {
+    expect(draftMessage('session-1', 'hello')).toBe(
+      'data: {"kind":"draft","sessionId":"session-1","text":"hello"}\n\n',
+    )
   })
 })
