@@ -47,6 +47,7 @@
 
 (require 'url)
 (require 'url-util)
+(require 'url-parse)
 (require 'subr-x)
 (require 'seq)
 (require 'json)
@@ -100,6 +101,15 @@ When non-nil and `gfm-view-mode' is loadable (markdown-mode installed),
 `*dsh-bridge-output*' and `*dsh-bridge-inbox*' inherit GitHub-Flavored
 Markdown font-locking, native code-block highlighting, and the read-only view
 keymap; otherwise they fall back to `special-mode'."
+  :type 'boolean
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-notifications t
+  "When non-nil, subscribe to bridge push notifications.
+Emacs opens a loopback connection to the bridge's event stream and, when the
+DSH web UI's \"Send to Emacs\" button deposits a message, pulls it into
+`*dsh-bridge-inbox*' automatically.  The listener starts lazily on first bridge
+use; `dsh-bridge-notifications-start' / `-stop' control it."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -160,6 +170,183 @@ lossless."
                           (string-trim (buffer-string)))))))
     (and token (string-to-unibyte token))))
 
+;;; Push notifications (loopback SSE listener for "Send to Emacs")
+
+(defvar dsh-bridge--notifications-enabled nil
+  "Whether the notification listener should stay connected.")
+
+(defvar dsh-bridge--notifications-process nil
+  "The live SSE notification process, or nil.")
+
+(defvar dsh-bridge--notifications-timer nil
+  "Reconnect timer for the notification listener, or nil.")
+
+(defvar dsh-bridge--notifications-raw ""
+  "Raw, not-yet-decoded bytes from the notification process (unibyte).")
+
+(defvar dsh-bridge--notifications-headers-done nil
+  "Non-nil once the HTTP response headers have been consumed.")
+
+(defvar dsh-bridge--notifications-sse ""
+  "Decoded, not-yet-parsed SSE text from the notification process.")
+
+(defvar dsh-bridge--notifications-inbox-pending nil
+  "Non-nil while an inbox pull is already scheduled.")
+
+(defun dsh-bridge--chunked-decode (text)
+  "Decode HTTP/1.1 chunked-transfer-encoded TEXT (a unibyte string).
+Return (DECODED . REST): DECODED is the decoded body prefix, REST is the raw
+trailing text of an incomplete chunk, to be completed by a later call."
+  (let ((chunks nil)
+        (rest text))
+    (catch 'done
+      (while t
+        (unless (string-match "\\`\\([0-9A-Fa-f]+\\)\r?\n" rest)
+          (throw 'done nil))
+        (let* ((hex (match-string 1 rest))
+               (size (string-to-number hex 16))
+               (size-end (match-end 0)))
+          (if (= size 0)
+              (if (>= (length rest) (+ size-end 2))
+                  (progn (setq rest (substring rest (+ size-end 2)))
+                         (throw 'done nil))
+                (throw 'done nil))
+            (let ((data-end (+ size-end size)))
+              (if (>= (length rest) (+ data-end 2))
+                  (progn (push (substring rest size-end data-end) chunks)
+                         (setq rest (substring rest (+ data-end 2))))
+                (throw 'done nil)))))))
+    (cons (apply #'concat (nreverse chunks)) rest)))
+
+(defun dsh-bridge--sse-parse (text)
+  "Parse accumulated SSE TEXT into (EVENTS . REST).
+EVENTS is a list of decoded `data:' payloads (alists); REST is the trailing
+text with no complete event terminator."
+  (let ((events nil)
+        (rest text))
+    (while (string-match "\\(?:\r?\n\\)\\{2\\}" rest)
+      (let ((chunk (substring rest 0 (match-beginning 0))))
+        (setq rest (substring rest (match-end 0)))
+        (dolist (line (split-string chunk "\r?\n"))
+          (when (string-prefix-p "data:" line)
+            (let ((json (condition-case nil
+                            (json-parse-string (string-trim (substring line 5))
+                                               :object-type 'alist
+                                               :array-type 'list)
+                          (error nil))))
+              (when json (push json events)))))))
+    (cons (nreverse events) rest)))
+
+(defun dsh-bridge--outbox-notice-p (events)
+  "Whether EVENTS (decoded SSE events) contain an outbox notice."
+  (seq-some (lambda (e) (equal (alist-get 'kind e) "outbox")) events))
+
+(defun dsh-bridge--notification-inbox ()
+  "Pull the inbox once for a pending push notification."
+  (setq dsh-bridge--notifications-inbox-pending nil)
+  ;; `dsh-bridge-inbox' is defined later in this file; call it via its symbol
+  ;; so the byte-compiler does not flag a forward reference.
+  (funcall 'dsh-bridge-inbox))
+
+(defun dsh-bridge--notification-filter (_proc string)
+  "Process filter for the SSE notification connection: decode and dispatch."
+  (setq dsh-bridge--notifications-raw
+        (concat dsh-bridge--notifications-raw string))
+  (unless dsh-bridge--notifications-headers-done
+    (let ((pos (string-match "\r\n\r\n" dsh-bridge--notifications-raw)))
+      (when pos
+        (setq dsh-bridge--notifications-raw
+              (substring dsh-bridge--notifications-raw (+ pos 4)))
+        (setq dsh-bridge--notifications-headers-done t))))
+  (when dsh-bridge--notifications-headers-done
+    (let* ((decoded (dsh-bridge--chunked-decode dsh-bridge--notifications-raw))
+           (body (decode-coding-string (car decoded) 'utf-8)))
+      (setq dsh-bridge--notifications-raw (cdr decoded))
+      (unless (string-empty-p body)
+        (setq dsh-bridge--notifications-sse
+              (concat dsh-bridge--notifications-sse body))
+        (let* ((parsed (dsh-bridge--sse-parse dsh-bridge--notifications-sse))
+               (events (car parsed)))
+          (setq dsh-bridge--notifications-sse (cdr parsed))
+          (when (and events
+                     (dsh-bridge--outbox-notice-p events)
+                     (not dsh-bridge--notifications-inbox-pending))
+            (setq dsh-bridge--notifications-inbox-pending t)
+            ;; Defer: `dsh-bridge-inbox' does a synchronous pull that must not
+            ;; re-enter this filter via `accept-process-output'.
+            (run-at-time 0 nil #'dsh-bridge--notification-inbox)))))))
+
+(defun dsh-bridge--notifications-retry ()
+  "Schedule a reconnect attempt for the notification listener."
+  (when (and dsh-bridge--notifications-enabled
+             (not (timerp dsh-bridge--notifications-timer)))
+    (setq dsh-bridge--notifications-timer
+          (run-at-time 5 nil #'dsh-bridge-notifications-start))))
+
+(defun dsh-bridge--notification-sentinel (_proc event)
+  "Sentinel for the SSE notification process: reconnect on close/error."
+  (unless (string-prefix-p "open" event)
+    (setq dsh-bridge--notifications-process nil)
+    (when dsh-bridge--notifications-enabled
+      (dsh-bridge--notifications-retry))))
+
+(defun dsh-bridge--notifications-connect (token)
+  "Open the SSE connection and send the subscribe request."
+  (let* ((parsed (url-generic-parse-url (concat dsh-bridge-url "/events")))
+         (host (url-host parsed))
+         (port (url-port parsed)))
+    (setq dsh-bridge--notifications-raw "")
+    (setq dsh-bridge--notifications-headers-done nil)
+    (setq dsh-bridge--notifications-sse "")
+    (setq dsh-bridge--notifications-process
+          (make-network-process
+           :name "dsh-bridge-notifications"
+           :host host
+           :service port
+           :family 'ipv4
+           :coding 'binary
+           :noquery t
+           :filter #'dsh-bridge--notification-filter
+           :sentinel #'dsh-bridge--notification-sentinel))
+    (process-send-string
+     dsh-bridge--notifications-process
+     (format "GET %s?token=%s HTTP/1.1\r\nHost: %s:%d\r\nAccept: text/event-stream\r\n\r\n"
+             (url-filename parsed) (url-hexify-string token) host port))))
+
+(defun dsh-bridge-notifications-start ()
+  "Connect the bridge notification listener (idempotent)."
+  (interactive)
+  (setq dsh-bridge--notifications-enabled t)
+  (when (timerp dsh-bridge--notifications-timer)
+    (cancel-timer dsh-bridge--notifications-timer)
+    (setq dsh-bridge--notifications-timer nil))
+  (unless (and dsh-bridge--notifications-process
+               (process-live-p dsh-bridge--notifications-process))
+    (let ((token (dsh-bridge--token)))
+      (if (null token)
+          (dsh-bridge--notifications-retry)
+        (condition-case nil
+            (dsh-bridge--notifications-connect token)
+          (error (dsh-bridge--notifications-retry)))))))
+
+(defun dsh-bridge-notifications-stop ()
+  "Stop the bridge notification listener."
+  (interactive)
+  (setq dsh-bridge--notifications-enabled nil)
+  (when (timerp dsh-bridge--notifications-timer)
+    (cancel-timer dsh-bridge--notifications-timer)
+    (setq dsh-bridge--notifications-timer nil))
+  (when (and dsh-bridge--notifications-process
+             (process-live-p dsh-bridge--notifications-process))
+    (delete-process dsh-bridge--notifications-process))
+  (setq dsh-bridge--notifications-process nil))
+
+(defun dsh-bridge--ensure-notifications ()
+  "Start the notification listener on first use, when enabled."
+  (when (and dsh-bridge-notifications
+             (not dsh-bridge--notifications-enabled))
+    (dsh-bridge-notifications-start)))
+
 (defun dsh-bridge--extra-headers (payload)
   "Return the HTTP header alist for a request with PAYLOAD (nil for no body).
 Always includes the bearer Authorization header when a token is known."
@@ -195,6 +382,7 @@ transport failure/timeout.  Uses `url-retrieve-synchronously': a request here
 is a short loopback round-trip, and the async `url-retrieve' path reports
 process-sentinel failures (such as the bug#23750 \"Multibyte text in HTTP
 request\" error) only via `message', which made them hard to diagnose."
+  (dsh-bridge--ensure-notifications)
   (let ((url-request-method method)
         (url-request-data
          (and payload (encode-coding-string (json-encode payload) 'utf-8)))
@@ -221,6 +409,7 @@ request\" error) only via `message', which made them hard to diagnose."
 STATUS is the HTTP status code, or nil on transport failure.  ALIST is the
 decoded JSON object (JSON null/false become nil, arrays become lists), or nil
 when the body is not a JSON object."
+  (dsh-bridge--ensure-notifications)
   (let ((url-request-method method)
         (url-request-data
          (and payload (encode-coding-string (json-encode payload) 'utf-8)))
@@ -479,8 +668,8 @@ the choice is resolved at load time."
      "Major mode for `*dsh-bridge-output*' and `*dsh-bridge-inbox*'.
 Read-only; the letter keys mirror the `dsh-bridge' dispatcher (`s' send,
 `d' draft, `f' re-fetch/re-pull, `i' pull inbox, `S' select session, `l' list
-sessions), `g' refreshes, `q' quits.  When derived from `gfm-view-mode' the
-buffer also gains GitHub-Flavored Markdown font-locking."
+sessions), `r' replies, `g' refreshes, `q' quits.  When derived from
+`gfm-view-mode' the buffer also gains GitHub-Flavored Markdown font-locking."
      (setq buffer-read-only t)))
 
 (if (and dsh-bridge-view-gfm (require 'markdown-mode nil t) (fboundp 'gfm-view-mode))
@@ -492,6 +681,7 @@ buffer also gains GitHub-Flavored Markdown font-locking."
   (define-key dsh-bridge-view-mode-map (kbd (car spec)) (cadr spec)))
 (define-key dsh-bridge-view-mode-map (kbd "g") #'revert-buffer)
 (define-key dsh-bridge-view-mode-map (kbd "q") #'quit-window)
+(define-key dsh-bridge-view-mode-map (kbd "r") #'dsh-bridge-reply)
 
 (easy-menu-define dsh-bridge-view-menu dsh-bridge-view-mode-map
   "Menu bar menu for the `*dsh-bridge-output*' and `*dsh-bridge-inbox*' buffers."
@@ -504,6 +694,8 @@ buffer also gains GitHub-Flavored Markdown font-locking."
      :help "Fetch the latest assistant reply into *dsh-bridge-output*"]
     ["Pull Inbox" dsh-bridge-inbox
      :help "Pull Send-to-Emacs messages into *dsh-bridge-inbox*"]
+    ["Reply" dsh-bridge-reply
+     :help "Open the prompt buffer to reply to the shown session"]
     "---"
     ["Select Session…" dsh-bridge-select-session
      :help "Pin the target session"]
@@ -630,16 +822,42 @@ and the ack redelivers them on the next pull (duplicates, not loss).
         (when entries (pop-to-buffer "*dsh-bridge-inbox*")))))))
 
 ;;;###autoload
-(defun dsh-bridge-prompt ()
-  "Pop to the persistent prompt-editing buffer `*dsh-bridge-prompt*'.
-The text survives sends, so a prompt can be edited and resubmitted; `C-c C-k'
-erases the buffer."
-  (interactive)
+(defun dsh-bridge--prompt-buffer ()
+  "Return the prompt buffer, ensuring it is in `dsh-bridge-prompt-mode'."
   (let ((buffer (get-buffer-create "*dsh-bridge-prompt*")))
     (with-current-buffer buffer
       (unless (eq major-mode 'dsh-bridge-prompt-mode)
         (dsh-bridge-prompt-mode)))
-    (pop-to-buffer buffer)))
+    buffer))
+
+;;;###autoload
+(defun dsh-bridge-prompt (&optional action)
+  "Pop to the persistent prompt-editing buffer `*dsh-bridge-prompt*'.
+ACTION, when non-nil, is a `display-buffer' action passed to `pop-to-buffer'.
+The text survives sends, so a prompt can be edited and resubmitted; `C-c C-k'
+erases the buffer."
+  (interactive)
+  (pop-to-buffer (dsh-bridge--prompt-buffer) action))
+
+(defconst dsh-bridge-prompt-display-action
+  '(display-buffer-reuse-window display-buffer-below-selected)
+  "`display-buffer' action for opening the prompt buffer to reply.
+Reuse the prompt's window when already visible, else show it below the
+selected window, so the output buffer stays visible (cf. `flymake',
+`debug').")
+
+(defun dsh-bridge-reply ()
+  "Pin the session whose output is shown, and open the prompt to reply.
+In `*dsh-bridge-output*' the reply targets the session the shown reply came
+from (pinning it); elsewhere it targets the current target.  The prompt is
+shown in another window so the output stays visible."
+  (interactive)
+  (let ((session-id (and (eq major-mode 'dsh-bridge-view-mode)
+                         dsh-bridge--view-content-session)))
+    (when (and session-id (dsh-bridge--session-live-p session-id))
+      (dsh-bridge-select-session session-id)))
+  (pop-to-buffer (dsh-bridge--prompt-buffer)
+                 dsh-bridge-prompt-display-action))
 
 ;;; The prompt buffer
 

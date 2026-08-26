@@ -292,3 +292,12 @@ export function tokenRequestsSameOrigin(host: string | undefined, origin: string
 export function draftMessage(sessionId: string, text: string): string {
   return `data: ${JSON.stringify({ kind: 'draft', sessionId, text })}\n\n`
 }
+
+/**
+ * One SSE `data:` frame signalling that new outbox entries are available (the
+ * "Send to Emacs" button deposited a message). A bare notice: consumers pull the
+ * outbox themselves, keeping the ack/redelivery semantics in one place.
+ */
+export function outboxMessage(): string {
+  return 'data: {"kind":"outbox"}\n\n'
+}

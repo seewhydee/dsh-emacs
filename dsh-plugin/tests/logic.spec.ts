@@ -8,6 +8,7 @@ import {
   isSubagentChild,
   latestAssistantText,
   mergeSessionRows,
+  outboxMessage,
   parseBearerAuthorization,
   resolveTargetId,
   sessionTitle,
@@ -307,5 +308,11 @@ describe('draftMessage', () => {
     expect(draftMessage('session-1', 'hello')).toBe(
       'data: {"kind":"draft","sessionId":"session-1","text":"hello"}\n\n',
     )
+  })
+})
+
+describe('outboxMessage', () => {
+  it('emits one SSE data frame signalling new outbox entries', () => {
+    expect(outboxMessage()).toBe('data: {"kind":"outbox"}\n\n')
   })
 })

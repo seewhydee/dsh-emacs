@@ -125,11 +125,18 @@ active session when none is selected.  A prefix argument to `send`/`draft`/
 `fetch` chooses the target session for that call only, without changing the
 pin.  The `*dsh-bridge-output*` and `*dsh-bridge-inbox*` buffers are
 read-only and bind the dispatcher's letters (`s`/`d`/`f`/`i`/`S`/`l`) plus
-`g` to refresh and `q` to dismiss.  When `markdown-mode` is installed (and
+`r` to reply (pin the shown session and open the prompt buffer below), `g` to
+refresh and `q` to dismiss.  When `markdown-mode` is installed (and
 `dsh-bridge-view-gfm` is non-nil), these buffers are derived from
 `gfm-view-mode`, so assistant replies are font-locked as GitHub-Flavored
 Markdown (including native highlighting of fenced code blocks); otherwise
 they fall back to `special-mode`.
+
+With `dsh-bridge-notifications` non-nil (the default), Emacs subscribes to the
+bridge's event stream (starting lazily on first use) and automatically pulls
+new "Send to Emacs" messages into `*dsh-bridge-inbox*` as they arrive, so no
+manual inbox pull is needed.  `dsh-bridge-notifications-start` /
+`dsh-bridge-notifications-stop` control the listener.
 
 The pre-interface command names (`dsh-bridge-send-region`,
 `dsh-bridge-send-buffer`, `dsh-bridge-send-draft-region`,

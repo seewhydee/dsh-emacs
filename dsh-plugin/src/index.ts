@@ -44,6 +44,7 @@ import {
   isSubagentChild,
   latestAssistantText,
   mergeSessionRows,
+  outboxMessage,
   parseBearerAuthorization,
   resolveTargetId,
   sessionTitle,
@@ -420,6 +421,12 @@ export function apply(ctx: Context): void {
             text,
             ts: Date.now(),
           })
+          // Notify every subscribed client (the browser and Emacs) that new
+          // inbox entries are ready.
+          const notice = outboxMessage()
+          for (const client of [...sseClients]) {
+            try { client.write(notice) } catch { sseClients.delete(client) }
+          }
           sendJson(res, 200, { ok: true, evicted })
         } catch (error: unknown) {
           const status = error instanceof PayloadTooLargeError ? 413 : 500

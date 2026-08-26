@@ -322,7 +322,26 @@ not the pinned target."
     (should (eq (lookup-key dsh-bridge-view-mode-map (kbd (car spec)))
                 (cadr spec))))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "g")) #'revert-buffer))
-  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "q")) #'quit-window)))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "q")) #'quit-window))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "r")) #'dsh-bridge-reply)))
+
+(ert-deftest dsh-bridge-reply-pins-content-session ()
+  "Reply pins the session whose output is shown and opens the prompt below."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (setq-local dsh-bridge--view-content-session "sess-a")
+    (let ((selected nil) (popped nil))
+      (cl-letf (((symbol-function 'dsh-bridge--session-live-p) (lambda (_) t))
+                ((symbol-function 'dsh-bridge-select-session)
+                 (lambda (id) (setq selected id)))
+                ((symbol-function 'dsh-bridge--prompt-buffer)
+                 (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf action) (setq popped (list buf action)))))
+        (dsh-bridge-reply))
+      (should (equal selected "sess-a"))
+      (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
+      (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
 
 (ert-deftest dsh-bridge-view-mode-gfm ()
   "When markdown-mode/gfm is loaded, the view mode inherits gfm-view-mode.
@@ -534,6 +553,61 @@ and the dispatcher layout contains the same keys."
                        dsh-bridge-view-mode-map
                        dsh-bridge-prompt-mode-map))
       (should (lookup-key map key)))))
+
+(ert-deftest dsh-bridge-chunked-decode ()
+  "HTTP/1.1 chunked transfer encoding is decoded byte-for-byte."
+  (let ((decoded (dsh-bridge--chunked-decode
+                  (string-to-unibyte "5\r\nhello\r\n0\r\n\r\n"))))
+    (should (equal (car decoded) (string-to-unibyte "hello")))
+    (should (equal (cdr decoded) "")))
+  ;; An incomplete chunk is held back whole for the next call.
+  (let ((decoded (dsh-bridge--chunked-decode (string-to-unibyte "5\r\nhel"))))
+    (should (equal (car decoded) ""))
+    (should (equal (cdr decoded) (string-to-unibyte "5\r\nhel"))))
+  ;; Multibyte UTF-8 payloads are framed by their byte length.
+  (let ((decoded (dsh-bridge--chunked-decode
+                  (encode-coding-string "3\r\n…\r\n0\r\n\r\n" 'utf-8))))
+    (should (equal (decode-coding-string (car decoded) 'utf-8) "…"))
+    (should (equal (cdr decoded) ""))))
+
+(ert-deftest dsh-bridge-sse-parse ()
+  "SSE `data:' frames are decoded; non-data lines and partial frames are handled."
+  (let ((result (dsh-bridge--sse-parse "")))
+    (should (null (car result)))
+    (should (equal (cdr result) "")))
+  (let ((result (dsh-bridge--sse-parse "retry: 5000\n\n")))
+    (should (null (car result)))
+    (should (equal (cdr result) "")))
+  (let ((result (dsh-bridge--sse-parse "data: {\"kind\":\"outbox\"}\n\n")))
+    (should (equal (car result) '(((kind . "outbox")))))
+    (should (equal (cdr result) "")))
+  ;; No trailing blank line yet: held back.
+  (let ((result (dsh-bridge--sse-parse "data: {\"kind\":\"outbox\"}")))
+    (should (null (car result)))
+    (should (equal (cdr result) "data: {\"kind\":\"outbox\"}")))
+  ;; Several events in one buffer.
+  (let ((result (dsh-bridge--sse-parse
+                 "data: {\"kind\":\"draft\"}\n\ndata: {\"kind\":\"outbox\"}\n\n")))
+    (should (equal (car result) '(((kind . "draft")) ((kind . "outbox")))))
+    (should (equal (cdr result) ""))))
+
+(ert-deftest dsh-bridge-outbox-notice-p ()
+  "Only outbox-kind events are treated as inbox notices."
+  (should (dsh-bridge--outbox-notice-p '(((kind . "outbox")))))
+  (should-not (dsh-bridge--outbox-notice-p '(((kind . "draft")))))
+  (should-not (dsh-bridge--outbox-notice-p nil)))
+
+(ert-deftest dsh-bridge-sse-decode-roundtrip ()
+  "A full chunked SSE body decodes to an outbox notice."
+  (let* ((payload "data: {\"kind\":\"outbox\"}\n\n")
+         (size (length (encode-coding-string payload 'utf-8)))
+         (raw (encode-coding-string
+               (concat (format "%x\r\n" size) payload "\r\n0\r\n\r\n")
+               'utf-8)))
+    (let* ((decoded (dsh-bridge--chunked-decode raw))
+           (parsed (dsh-bridge--sse-parse
+                    (decode-coding-string (car decoded) 'utf-8))))
+      (should (dsh-bridge--outbox-notice-p (car parsed))))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here
