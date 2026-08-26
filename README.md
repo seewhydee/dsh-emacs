@@ -110,8 +110,9 @@ From Emacs:
   "Send to Emacs" button on assistant messages in the web UI) into
   `*dsh-bridge-inbox*`.
 - `M-x dsh-bridge-list-sessions` — browse DSH sessions in a
-  `*dsh-bridge-sessions*` buffer, sorted by age; shows a marker column
-  (`*` for the pinned session), the session name, its age, and its workspace.
+  `*dsh-bridge-sessions*` buffer, sorted by age; shows a pin-marker column
+  (`*` for the pinned session), a running-marker column (`…` while a session's
+  model is working), the session name, its age, and its workspace.
   Live sessions are listed by default; `v` toggles saved (cold) sessions.
   `RET` pins the session under point (live only), `u` unpins, `p` pins and
   opens the prompt buffer, `f` peeks the session's latest reply without
@@ -124,7 +125,11 @@ active session when none is selected.  A prefix argument to `send`/`draft`/
 `fetch` chooses the target session for that call only, without changing the
 pin.  The `*dsh-bridge-output*` and `*dsh-bridge-inbox*` buffers are
 read-only and bind the dispatcher's letters (`s`/`d`/`f`/`i`/`S`/`l`) plus
-`g` to refresh and `q` to dismiss.
+`g` to refresh and `q` to dismiss.  When `markdown-mode` is installed (and
+`dsh-bridge-view-gfm` is non-nil), these buffers are derived from
+`gfm-view-mode`, so assistant replies are font-locked as GitHub-Flavored
+Markdown (including native highlighting of fenced code blocks); otherwise
+they fall back to `special-mode`.
 
 The pre-interface command names (`dsh-bridge-send-region`,
 `dsh-bridge-send-buffer`, `dsh-bridge-send-draft-region`,

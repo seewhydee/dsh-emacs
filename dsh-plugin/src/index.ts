@@ -208,6 +208,7 @@ export function apply(ctx: Context): void {
         id: String(session.id),
         header: { cwd: session.header.cwd, createdAt: session.header.createdAt },
         events: session.events,
+        running: ctx.agents.get(session.id)?.status === 'running',
       }))
   }
 

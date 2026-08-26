@@ -324,6 +324,19 @@ not the pinned target."
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "g")) #'revert-buffer))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "q")) #'quit-window)))
 
+(ert-deftest dsh-bridge-view-mode-gfm ()
+  "When markdown-mode/gfm is loaded, the view mode inherits gfm-view-mode.
+No-op child of the markdown-less test environment; asserts the GitHub-Flavored
+Markdown wiring in a session where markdown-mode is available."
+  (when (featurep 'markdown-mode)
+    (with-temp-buffer
+      (insert "# Heading\n")
+      (dsh-bridge-view-mode)
+      (should (derived-mode-p 'gfm-view-mode))
+      (should font-lock-defaults)
+      (should markdown-fontify-code-blocks-natively)
+      (should buffer-read-only))))
+
 (ert-deftest dsh-bridge-prompt-mode-basics ()
   "The prompt mode derives from text-mode in a markdown-less environment and
 binds C-c C-c / C-c C-d / C-c C-k."
@@ -349,22 +362,22 @@ binds C-c C-c / C-c C-d / C-c C-k."
   (should (eq (symbol-function 'dsh-bridge-send-draft-buffer) 'dsh-bridge-draft)))
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()
-  "The session list shows a marker column plus Session/Age/Workspace."
+  "The session list shows marker/R/Session/Age/Workspace columns."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
   (let ((dsh-bridge-target-session "live-1")
         (dsh-bridge-sessions-show-saved t))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
-                 '(((id . "live-1") (live . t) (title . "First live") (cwd . "/a")
-                    (lastActive . 1700000000000))
+                 '(((id . "live-1") (live . t) (running . t) (title . "First live")
+                    (cwd . "/a") (lastActive . 1700000000000))
                    ((id . "saved-1") (live . nil) (title . "A saved one") (cwd . "/b")
                     (createdAt . 1690000000000)))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
       (should buf)
-      (should (= (length (buffer-local-value 'tabulated-list-format buf)) 4))
+      (should (= (length (buffer-local-value 'tabulated-list-format buf)) 5))
       (should (equal (buffer-local-value 'tabulated-list-sort-key buf)
                      '("Age" . t)))
       (let* ((entries (buffer-local-value 'tabulated-list-entries buf))
@@ -374,26 +387,29 @@ binds C-c C-c / C-c C-d / C-c C-k."
              (saved-cells (cadr saved)))
         (should live)
         (should saved)
-        ;; Marker column (index 0): "*" + face for the target, a space otherwise.
+        ;; Pin marker (index 0): "*" + face for the target, a space otherwise.
         (should (equal (aref live-cells 0) "*"))
         (should (eq (get-text-property 0 'face (aref live-cells 0))
                     'dsh-bridge-current-target-face))
         (should (equal (aref saved-cells 0) " "))
-        ;; Session name (index 1): unaltered name, saved face for saved rows.
-        (should (equal (aref live-cells 1) "First live"))
-        (should (equal (aref saved-cells 1) "A saved one"))
-        (should (eq (get-text-property 0 'face (aref saved-cells 1))
+        ;; Running marker (index 1): "…" when running, a space otherwise.
+        (should (equal (aref live-cells 1) "…"))
+        (should (equal (aref saved-cells 1) " "))
+        ;; Session name (index 2): unaltered name, saved face for saved rows.
+        (should (equal (aref live-cells 2) "First live"))
+        (should (equal (aref saved-cells 2) "A saved one"))
+        (should (eq (get-text-property 0 'face (aref saved-cells 2))
                     'dsh-bridge-saved-session-face))
-        ;; Age (index 2) carries the raw activity timestamp.
+        ;; Age (index 3) carries the raw activity timestamp.
         (should (equal (get-text-property 0 'dsh-bridge-age-ts
-                                          (aref live-cells 2))
+                                          (aref live-cells 3))
                        1700000000000))
         (should (equal (get-text-property 0 'dsh-bridge-age-ts
-                                          (aref saved-cells 2))
+                                          (aref saved-cells 3))
                        1690000000000))
-        ;; Workspace (index 3) is the cwd basename without a workspace title.
-        (should (equal (aref live-cells 3) "a"))
-        (should (equal (aref saved-cells 3) "b"))))))
+        ;; Workspace (index 4) is the cwd basename without a workspace title.
+        (should (equal (aref live-cells 4) "a"))
+        (should (equal (aref saved-cells 4) "b"))))))
 
 (ert-deftest dsh-bridge-list-sessions-shows-ids-when-enabled ()
   "With `dsh-bridge-show-session-ids' non-nil, an Id column appears."
@@ -406,10 +422,10 @@ binds C-c C-c / C-c C-d / C-c C-k."
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
-      (should (= (length (buffer-local-value 'tabulated-list-format buf)) 5))
+      (should (= (length (buffer-local-value 'tabulated-list-format buf)) 6))
       (let* ((entries (buffer-local-value 'tabulated-list-entries buf))
              (cells (cadr (assoc "live-1" entries))))
-        (should (equal (aref cells 4) "live-1"))))))
+        (should (equal (aref cells 5) "live-1"))))))
 
 (ert-deftest dsh-bridge-list-sessions-hides-saved-by-default ()
   "Saved sessions are hidden by default and revealed by the toggle."
@@ -448,6 +464,12 @@ binds C-c C-c / C-c C-d / C-c C-k."
   (should (equal (dsh-bridge--workspace-label '((cwd . "/x/"))) "x"))
   (should (equal (dsh-bridge--workspace-label '((cwd . "/"))) "/"))
   (should (equal (dsh-bridge--workspace-label '((id . "i"))) "")))
+
+(ert-deftest dsh-bridge-running-marker ()
+  "The running marker is \"…\" when running, a space otherwise."
+  (should (equal (dsh-bridge--running-marker '((running . t))) "…"))
+  (should (equal (dsh-bridge--running-marker '((running . nil))) " "))
+  (should (equal (dsh-bridge--running-marker '((id . "s"))) " ")))
 
 (ert-deftest dsh-bridge-relative-age ()
   "Ages match DSH's buckets (now/min/h/d/mo/y)."

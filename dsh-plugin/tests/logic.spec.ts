@@ -20,11 +20,12 @@ import {
   type SessionHeaderLike,
 } from '../src/logic.ts'
 
-function liveSession(id: string, opts: { cwd?: string; createdAt?: number; eventTimes?: number[]; events?: SessionEventLike[] } = {}): LiveSessionLike {
+function liveSession(id: string, opts: { cwd?: string; createdAt?: number; eventTimes?: number[]; events?: SessionEventLike[]; running?: boolean } = {}): LiveSessionLike {
   return {
     id,
     header: { cwd: opts.cwd, createdAt: opts.createdAt ?? 0 },
     events: opts.events ?? (opts.eventTimes ?? []).map(time => ({ time })),
+    running: opts.running ?? false,
   }
 }
 
@@ -93,7 +94,12 @@ describe('mergeSessionRows', () => {
       [liveSession('a', { createdAt: 10, eventTimes: [20, 30] })],
       [],
     )
-    expect(rows).toEqual([{ id: 'a', title: null, cwd: null, live: true, lastActive: 30, createdAt: 10 }])
+    expect(rows).toEqual([{ id: 'a', title: null, cwd: null, live: true, running: false, lastActive: 30, createdAt: 10 }])
+  })
+
+  it('passes through the live running flag', () => {
+    const rows = mergeSessionRows([liveSession('a', { createdAt: 10, running: true })], [])
+    expect(rows[0]!.running).toBe(true)
   })
 
   it('folds the live title from the latest session/title event', () => {
@@ -109,12 +115,12 @@ describe('mergeSessionRows', () => {
     expect(rows[0]!.lastActive).toBe(10)
   })
 
-  it('marks persisted sessions and skips subagent headers', () => {
+  it('marks persisted sessions as not running and skips subagent headers', () => {
     const rows = mergeSessionRows(
       [],
       [header('a', { createdAt: 1 }), header('sub', { origin: 'subagent' })],
     )
-    expect(rows).toEqual([{ id: 'a', title: null, cwd: null, live: false, createdAt: 1 }])
+    expect(rows).toEqual([{ id: 'a', title: null, cwd: null, live: false, running: false, createdAt: 1 }])
   })
 
   it('passes through a persisted title', () => {

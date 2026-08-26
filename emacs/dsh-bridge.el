@@ -94,6 +94,15 @@ reloading."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-view-gfm t
+  "Use `gfm-view-mode' for the output/inbox view buffers when available.
+When non-nil and `gfm-view-mode' is loadable (markdown-mode installed),
+`*dsh-bridge-output*' and `*dsh-bridge-inbox*' inherit GitHub-Flavored
+Markdown font-locking, native code-block highlighting, and the read-only view
+keymap; otherwise they fall back to `special-mode'."
+  :type 'boolean
+  :group 'dsh-bridge)
+
 (defcustom dsh-bridge-show-session-ids nil
   "When non-nil, show raw DSH session ids in the sessions list.
 Session ids are internal to the bridge; by default the list and the selector
@@ -456,15 +465,33 @@ so.  The inbox (a global log) leaves this nil and labels the target.")
   "Header line for the prompt buffer: the current target."
   (format "DSH Bridge · target: %s" (dsh-bridge--target-label)))
 
-(define-derived-mode dsh-bridge-view-mode special-mode "DSH-View"
-  "Major mode for `*dsh-bridge-output*' and `*dsh-bridge-inbox*'.
-Read-only (inherited from `special-mode'); refreshed with `g'
-(`revert-buffer-function').  The letter keys mirror the `dsh-bridge'
-dispatcher: `s' send, `d' draft, `f' re-fetch/re-pull, `i' pull inbox,
-`S' select session, `l' list sessions.  `h' or `?' describes this mode.")
+(declare-function gfm-view-mode "markdown-mode")
+(declare-function dsh-bridge-view-mode "dsh-bridge")
+;; The mode map is created by whichever branch of the `if' runs; declare it here
+;; so the byte-compiler knows the `define-key' forms below are valid.
+(defvar dsh-bridge-view-mode-map)
 
+(defmacro dsh-bridge--define-view-mode (parent)
+  "Define `dsh-bridge-view-mode' as a variant of PARENT.
+PARENT is `gfm-view-mode' when markdown-mode is installed, else `special-mode';
+the choice is resolved at load time."
+  `(define-derived-mode dsh-bridge-view-mode ,parent "DSH-View"
+     "Major mode for `*dsh-bridge-output*' and `*dsh-bridge-inbox*'.
+Read-only; the letter keys mirror the `dsh-bridge' dispatcher (`s' send,
+`d' draft, `f' re-fetch/re-pull, `i' pull inbox, `S' select session, `l' list
+sessions), `g' refreshes, `q' quits.  When derived from `gfm-view-mode' the
+buffer also gains GitHub-Flavored Markdown font-locking."
+     (setq buffer-read-only t)))
+
+(if (and dsh-bridge-view-gfm (require 'markdown-mode nil t) (fboundp 'gfm-view-mode))
+    (dsh-bridge--define-view-mode gfm-view-mode)
+  (dsh-bridge--define-view-mode special-mode))
+
+;; The dispatcher letters plus refresh/dismiss, always present in the mode keymap.
 (dolist (spec dsh-bridge--verb-suffixes)
   (define-key dsh-bridge-view-mode-map (kbd (car spec)) (cadr spec)))
+(define-key dsh-bridge-view-mode-map (kbd "g") #'revert-buffer)
+(define-key dsh-bridge-view-mode-map (kbd "q") #'quit-window)
 
 (easy-menu-define dsh-bridge-view-menu dsh-bridge-view-mode-map
   "Menu bar menu for the `*dsh-bridge-output*' and `*dsh-bridge-inbox*' buffers."
@@ -772,6 +799,10 @@ target, else a space."
       (propertize "*" 'face 'dsh-bridge-current-target-face)
     " "))
 
+(defun dsh-bridge--running-marker (session)
+  "Return the running-marker cell for SESSION: \"…\" when running, else a space."
+  (if (alist-get 'running session) "…" " "))
+
 (defun dsh-bridge--session-cell (session)
   "Session name cell for SESSION, with saved/untitled faces."
   (let* ((title (alist-get 'title session))
@@ -804,6 +835,7 @@ carrying the raw ms-epoch timestamp in its `dsh-bridge-age-ts' text property."
                              (propertize workspace 'help-echo cwd)
                            workspace))
          (cols (vector (dsh-bridge--target-marker session)
+                       (dsh-bridge--running-marker session)
                        (dsh-bridge--session-cell session)
                        age
                        workspace-cell)))
@@ -959,6 +991,7 @@ Returns non-nil when sessions were listed."
                     (lambda (&rest _) (dsh-bridge--list-sessions-in-buffer)))
         (setq tabulated-list-format
               (let ((format [("*" 1 t)
+                             ("R" 1 t)
                              ("Session" 40 t)
                              ("Age" 8 dsh-bridge--age-sorter)
                              ("Workspace" 0 t)]))

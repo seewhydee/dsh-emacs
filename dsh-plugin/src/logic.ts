@@ -63,6 +63,8 @@ export interface LiveSessionLike {
   id: string
   header: { cwd?: string; createdAt: number }
   events: readonly SessionEventLike[]
+  /** Whether the live agent is actively processing a turn (not yet quiesced). */
+  running: boolean
 }
 
 /** Structural view of one persisted session header. */
@@ -80,6 +82,8 @@ export interface SessionRow {
   title: string | null
   cwd: string | null
   live: boolean
+  /** Whether the session's agent is currently running a turn (never for cold). */
+  running: boolean
   lastActive?: number
   createdAt: number
   /** Display name of the workspace the session belongs to, when one is known. */
@@ -146,6 +150,7 @@ export function mergeSessionRows(
       title: sessionTitle(session.events),
       cwd: session.header.cwd ?? null,
       live: true,
+      running: session.running,
       lastActive: session.events.at(-1)?.time ?? session.header.createdAt,
       createdAt: session.header.createdAt,
     })
@@ -159,6 +164,7 @@ export function mergeSessionRows(
       title: header.title ?? null,
       cwd: header.cwd ?? null,
       live: false,
+      running: false,
       createdAt: header.createdAt,
     })
   }
