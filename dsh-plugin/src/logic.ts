@@ -82,6 +82,27 @@ export interface SessionRow {
   live: boolean
   lastActive?: number
   createdAt: number
+  /** Display name of the workspace the session belongs to, when one is known. */
+  workspace?: string | null
+}
+
+/** Minimal structural face of one workspace, enough for a session->title map. */
+export interface WorkspaceLike {
+  title: string
+  sessionIds: readonly string[]
+}
+
+/**
+ * Build a session-id -> workspace-title map from the registry's workspaces.
+ * A session accounted by several workspaces keeps the last one's title (the
+ * registry invariant forbids that overlap in practice).
+ */
+export function workspaceTitlesBySession(workspaces: readonly WorkspaceLike[]): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const workspace of workspaces) {
+    for (const id of workspace.sessionIds) map.set(id, workspace.title)
+  }
+  return map
 }
 
 /**

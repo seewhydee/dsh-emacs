@@ -109,10 +109,13 @@ From Emacs:
 - `M-x dsh-bridge-inbox` — pull messages sent from DSH (e.g. via the
   "Send to Emacs" button on assistant messages in the web UI) into
   `*dsh-bridge-inbox*`.
-- `M-x dsh-bridge-list-sessions` — browse live and saved DSH sessions in a
-  `*dsh-bridge-sessions*` buffer, sorted by last activity.  `RET` pins the
-  session under point (live only), `u` unpins, `p` pins and opens the prompt
-  buffer, `f` peeks the session's latest reply without changing the pin.
+- `M-x dsh-bridge-list-sessions` — browse DSH sessions in a
+  `*dsh-bridge-sessions*` buffer, sorted by age; shows a marker column
+  (`*` for the pinned session), the session name, its age, and its workspace.
+  Live sessions are listed by default; `v` toggles saved (cold) sessions.
+  `RET` pins the session under point (live only), `u` unpins, `p` pins and
+  opens the prompt buffer, `f` peeks the session's latest reply without
+  changing the pin, `w` copies the session id, `D` shows session details.
 - `M-x dsh-bridge-select-session` — choose the target session (live sessions
   only; choose `(last-active)` to unpin).
 

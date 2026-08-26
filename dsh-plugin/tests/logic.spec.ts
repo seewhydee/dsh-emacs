@@ -13,6 +13,7 @@ import {
   sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
+  workspaceTitlesBySession,
   type LiveSessionLike,
   type MessageLike,
   type SessionEventLike,
@@ -154,6 +155,23 @@ describe('sessionTitle', () => {
     expect(sessionTitle([{ time: 1, type: 'session/title', data: null }])).toBeNull()
     expect(sessionTitle([{ time: 1, type: 'session/title', data: { title: '' } }])).toBeNull()
     expect(sessionTitle([{ time: 1, type: 'session/title', data: { title: 42 } }])).toBeNull()
+  })
+})
+
+describe('workspaceTitlesBySession', () => {
+  it('maps session ids to their workspace titles', () => {
+    const map = workspaceTitlesBySession([
+      { title: 'alpha', sessionIds: ['s1', 's2'] },
+      { title: 'beta', sessionIds: ['s3'] },
+    ])
+    expect(map.get('s1')).toBe('alpha')
+    expect(map.get('s2')).toBe('alpha')
+    expect(map.get('s3')).toBe('beta')
+    expect(map.get('s4')).toBeUndefined()
+  })
+
+  it('returns an empty map for no workspaces', () => {
+    expect(workspaceTitlesBySession([]).size).toBe(0)
   })
 })
 

@@ -49,11 +49,13 @@ import {
   sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
+  workspaceTitlesBySession,
   type LiveSessionLike,
   type ResolveTargetResult,
   type SessionEventLike,
   type SessionHeaderLike,
   type SessionRow,
+  type WorkspaceLike,
 } from './logic.ts'
 
 export const name = 'dsh-bridge'
@@ -93,6 +95,15 @@ interface ProjectionSnapshotLike {
  */
 interface ProjectionCacheService {
   cachedSnapshot(meta: SessionHeader): ProjectionSnapshotLike | undefined
+}
+
+/**
+ * Minimal face of the optional `workspaceRegistry` service. Read via `ctx.get`;
+ * a profile without the registry leaves workspace titles unset, and Emacs falls
+ * back to the cwd basename.
+ */
+interface WorkspaceRegistryService {
+  list(): WorkspaceLike[]
 }
 
 /** The target of a bridge operation: a live session plus its live agent. */
@@ -269,7 +280,10 @@ export function apply(ctx: Context): void {
       // Persistence listing is auxiliary to the live view; a backend failure
       // must not hide the sessions that are actually running now.
     }
-    return mergeSessionRows(targetableSessions(), persisted)
+    const rows = mergeSessionRows(targetableSessions(), persisted)
+    const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+    const workspaceBySession = workspaceTitlesBySession(workspaceRegistry?.list() ?? [])
+    return rows.map(row => ({ ...row, workspace: workspaceBySession.get(row.id) ?? null }))
   }
 
   /** Whether a request carries the shared token as a bearer credential. */
