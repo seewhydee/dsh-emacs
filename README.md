@@ -65,7 +65,7 @@ script (`pnpm dsh web`):
 
 ```sh
 # source checkout, from the harness directory (absolute path):
-pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs/dsh-plugin
+pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs-bridge/dsh-plugin
 pnpm dsh web
 ```
 
@@ -73,9 +73,11 @@ The `link:` path above should be the directory you invoke `dsh` from.
 
 ## Install the Emacs package
 
+Put this in your Emacs init file (`~/.emacs.d/init.el` or `~/.emacs`),
+replacing the path with the actual path to `dsh-bridge.el`.
+
 ```elisp
-(add-to-list 'load-path "/path/to/dsh-emacs/emacs")
-(require 'dsh-bridge) ; Or use `load`
+(load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
 ```
 
 ## Authentication

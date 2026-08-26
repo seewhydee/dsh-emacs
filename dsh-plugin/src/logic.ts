@@ -47,11 +47,22 @@ export function latestAssistantText(messages: readonly MessageLike[]): string {
   return ''
 }
 
+/**
+ * Minimal structural face of one logged event, enough to fold a title and
+ * last-activity time. `data` is deliberately `unknown`: the real `SessionEvent`
+ * union satisfies this shape, and the title fold narrows the payload it reads.
+ */
+export interface SessionEventLike {
+  time: number
+  type?: string
+  data?: unknown
+}
+
 /** Structural view of one live session, enough for targeting and listing. */
 export interface LiveSessionLike {
   id: string
   header: { cwd?: string; createdAt: number }
-  events: readonly { time: number }[]
+  events: readonly SessionEventLike[]
 }
 
 /** Structural view of one persisted session header. */
@@ -60,11 +71,13 @@ export interface SessionHeaderLike {
   cwd?: string
   createdAt: number
   origin?: string
+  title?: string | null
 }
 
 /** One entry in the merged session inventory handed to Emacs. */
 export interface SessionRow {
   id: string
+  title: string | null
   cwd: string | null
   live: boolean
   lastActive?: number
@@ -78,6 +91,19 @@ export interface SessionRow {
  */
 export function isSubagentChild(origin: string | undefined, ownedByParent: boolean): boolean {
   return origin === 'subagent' || ownedByParent
+}
+
+/**
+ * The latest `session/title` event's title, or null. Last-wins fold of the
+ * same event DSH's own session list projects as the display title; titles are
+ * normalized non-empty strings, so a malformed or empty payload reads as null.
+ */
+export function sessionTitle(events: readonly SessionEventLike[]): string | null {
+  const event = events.findLast(item => item.type === 'session/title')
+  const data = event?.data
+  if (typeof data !== 'object' || data === null) return null
+  const title = (data as { title?: unknown }).title
+  return typeof title === 'string' && title !== '' ? title : null
 }
 
 /**
@@ -96,6 +122,7 @@ export function mergeSessionRows(
     liveIds.add(id)
     rows.push({
       id,
+      title: sessionTitle(session.events),
       cwd: session.header.cwd ?? null,
       live: true,
       lastActive: session.events.at(-1)?.time ?? session.header.createdAt,
@@ -106,7 +133,13 @@ export function mergeSessionRows(
     if (header.origin === 'subagent') continue
     const id = header.id
     if (liveIds.has(id)) continue
-    rows.push({ id, cwd: header.cwd ?? null, live: false, createdAt: header.createdAt })
+    rows.push({
+      id,
+      title: header.title ?? null,
+      cwd: header.cwd ?? null,
+      live: false,
+      createdAt: header.createdAt,
+    })
   }
   return rows
 }

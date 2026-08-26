@@ -113,7 +113,7 @@
                  (setq choices-seen table)
                  "(last-active)")))
       (call-interactively #'dsh-bridge-select-session))
-    (should (equal choices-seen '("live-1" "(last-active)")))))
+    (should (equal choices-seen '(("a" . "live-1") ("(last-active)" . nil))))))
 
 (defconst dsh-bridge-test--outbox-response
   (cons 200
@@ -349,21 +349,21 @@ binds C-c C-c / C-c C-d / C-c C-k."
   (should (eq (symbol-function 'dsh-bridge-send-draft-buffer) 'dsh-bridge-draft)))
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()
-  "The session list has a Last active column, blanks it for saved sessions,
-and marks the pinned session's row."
+  "The session list shows labels, an Age column, and marks the pinned row."
   (let ((dsh-bridge-target-session "live-1"))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
-                 '(((id . "live-1") (live . t) (cwd . "/a")
+                 '(((id . "live-1") (live . t) (title . "First live") (cwd . "/a")
                     (lastActive . 1700000000000))
-                   ((id . "saved-1") (live . nil) (cwd . "/b")))))
+                   ((id . "saved-1") (live . nil) (title . "A saved one") (cwd . "/b")
+                    (createdAt . 1690000000000)))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
       (should buf)
       (should (= (length (buffer-local-value 'tabulated-list-format buf)) 4))
       (should (equal (buffer-local-value 'tabulated-list-sort-key buf)
-                     '("Last active" . t)))
+                     '("Age" . t)))
       (let* ((entries (buffer-local-value 'tabulated-list-entries buf))
              (live (assoc "live-1" entries))
              (saved (assoc "saved-1" entries))
@@ -371,16 +371,54 @@ and marks the pinned session's row."
              (saved-cells (cadr saved)))
         (should live)
         (should saved)
-        ;; Pinned row: marker + face on the session cell.
-        (should (string-prefix-p "▶ " (aref live-cells 0)))
+        ;; Pinned row: marker + face on the label cell.
+        (should (equal (aref live-cells 0) "▶ First live"))
         (should (eq (get-text-property 0 'face (aref live-cells 0))
                     'dsh-bridge-current-target-face))
-        ;; Saved row: plain id, blank last-active.
-        (should (equal (aref saved-cells 0) "saved-1"))
-        (should (equal (aref saved-cells 3) ""))
-        ;; Live row: formatted last-active.
-        (should (equal (aref live-cells 3)
-                       (dsh-bridge--format-last-active 1700000000000)))))))
+        ;; Saved row: plain label.
+        (should (equal (aref saved-cells 0) "A saved one"))
+        ;; Age cells are strings carrying the raw timestamp as a text property.
+        (should (stringp (aref live-cells 3)))
+        (should (equal (get-text-property 0 'dsh-bridge-age-ts
+                                          (aref live-cells 3))
+                       1700000000000))
+        (should (equal (get-text-property 0 'dsh-bridge-age-ts
+                                          (aref saved-cells 3))
+                       1690000000000))))))
+
+(ert-deftest dsh-bridge-list-sessions-shows-ids-when-enabled ()
+  "With `dsh-bridge-show-session-ids' non-nil, an Id column appears."
+  (let ((dsh-bridge-target-session nil)
+        (dsh-bridge-show-session-ids t))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda () '(((id . "live-1") (live . t) (cwd . "/a")))))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+      (dsh-bridge-list-sessions))
+    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+      (should (= (length (buffer-local-value 'tabulated-list-format buf)) 5))
+      (let* ((entries (buffer-local-value 'tabulated-list-entries buf))
+             (cells (cadr (assoc "live-1" entries))))
+        (should (equal (aref cells 4) "live-1"))))))
+
+(ert-deftest dsh-bridge-session-label-precedence ()
+  "The label is the title, else the cwd basename, else the raw id."
+  (should (equal (dsh-bridge--session-label '((title . "T") (cwd . "/x") (id . "i")))
+                 "T"))
+  (should (equal (dsh-bridge--session-label '((cwd . "/x/y") (id . "i"))) "y"))
+  (should (equal (dsh-bridge--session-label '((cwd . "/x/") (id . "i"))) "x"))
+  (should (equal (dsh-bridge--session-label '((id . "i"))) "i"))
+  (should (equal (dsh-bridge--session-label '((title . "") (cwd . "/x") (id . "i")))
+                 "x")))
+
+(ert-deftest dsh-bridge-relative-age ()
+  "Ages format as now/minutes/hours/days, then an absolute date."
+  (let ((now 1700000000))
+    (should (equal (dsh-bridge--relative-age (* now 1000) now) "now"))
+    (should (equal (dsh-bridge--relative-age (* (- now 90) 1000) now) "1m"))
+    (should (equal (dsh-bridge--relative-age (* (- now 7200) 1000) now) "2h"))
+    (should (equal (dsh-bridge--relative-age (* (- now 86400) 1000) now) "1d")))
+  (should (equal (dsh-bridge--relative-age 0 1700000000)
+                 (format-time-string "%Y-%m-%d" 0))))
 
 (ert-deftest dsh-bridge-sessions-revert-refetches ()
   "`g' in the sessions buffer re-fetches the list from the host."
@@ -421,7 +459,8 @@ and the dispatcher layout contains the same keys."
   (dolist (spec dsh-bridge--verb-suffixes)
     (should (eq (lookup-key dsh-bridge-view-mode-map (kbd (car spec)))
                 (cadr spec)))
-    (should (transient--layout-member (car spec) 'dsh-bridge))))
+    ;; Use transient's public API to check the dispatcher layout.
+    (should (transient-get-suffix 'dsh-bridge (car spec)))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

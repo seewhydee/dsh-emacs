@@ -94,9 +94,21 @@ reloading."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-show-session-ids nil
+  "When non-nil, show raw DSH session ids in the sessions list.
+Session ids are internal to the bridge; by default the list and the selector
+show only friendly labels.  Enable this for debugging."
+  :type 'boolean
+  :group 'dsh-bridge)
+
 (defvar dsh-bridge-target-session nil
   "DSH session id the bridge targets, or nil for the last-active session.
 Set with `dsh-bridge-select-session'.")
+
+(defvar dsh-bridge--sessions-cache nil
+  "Last list of session row alists fetched from the host, or nil.
+Kept so an id can be turned back into its display label without an extra HTTP
+request.")
 
 ;;; Low-level HTTP plumbing
 
@@ -210,44 +222,108 @@ when the body is not a JSON object."
             (cons status alist)))))))
 
 (defun dsh-bridge--fetch-sessions ()
-  "Return the DSH session list as a list of alists, or nil on error."
+  "Return the DSH session list as a list of alists, or nil on error.
+Also caches the list in `dsh-bridge--sessions-cache' for id->label lookups."
   (let* ((result (dsh-bridge--request "GET" "/sessions" nil))
-         (alist (cdr result)))
-    (and alist (assoc 'sessions alist) (cdr (assoc 'sessions alist)))))
+         (alist (cdr result))
+         (sessions (and alist (assoc 'sessions alist)
+                        (cdr (assoc 'sessions alist)))))
+    (when sessions
+      (setq dsh-bridge--sessions-cache sessions))
+    sessions))
 
 (defun dsh-bridge--inbox-header (entry)
   "Return a provenance header line for an outbox ENTRY."
   (format "--- %s%s%s ---"
           (or (alist-get 'source entry) "bridge")
           (let ((sid (alist-get 'sessionId entry)))
-            (if sid (format " | session %s" sid) ""))
+            (if sid
+                (format " | session %s"
+                        (or (dsh-bridge--label-for-id sid) sid))
+              ""))
           (let ((ts (alist-get 'ts entry)))
             (if ts (format " | %s"
                            (format-time-string "%Y-%m-%d %H:%M:%S"
                                                (/ ts 1000)))
               ""))))
 
+;;; Session labels
+
+(defun dsh-bridge--session-label (session)
+  "Return the display label for SESSION (a row alist).
+Mirrors DSH's display title: the session title, else the workspace basename,
+else the raw id."
+  (or (let ((title (alist-get 'title session)))
+        (and (stringp title) (not (string-empty-p title)) title))
+      (let ((cwd (alist-get 'cwd session)))
+        (and (stringp cwd) (not (string-empty-p cwd))
+             (let ((base (file-name-nondirectory (directory-file-name cwd))))
+               (and (not (string-empty-p base)) base))))
+      (alist-get 'id session)))
+
+(defun dsh-bridge--session-for-id (id)
+  "Return the cached session row alist whose id is ID, or nil."
+  (seq-find (lambda (s) (equal (alist-get 'id s) id))
+            dsh-bridge--sessions-cache))
+
+(defun dsh-bridge--label-for-id (id)
+  "Return the display label for session ID, or nil when unknown."
+  (let ((session (dsh-bridge--session-for-id id)))
+    (and session (dsh-bridge--session-label session))))
+
+(defun dsh-bridge--label-from-response (alist fallback-id)
+  "Return a display label from a bridge response ALIST.
+Prefers the response's `title' (fresh from the host), then the cached label
+of FALLBACK-ID, then FALLBACK-ID itself."
+  (or (alist-get 'title alist)
+      (and fallback-id
+           (or (dsh-bridge--label-for-id fallback-id) fallback-id))))
+
+(defun dsh-bridge--session-activity (session)
+  "Return the ms-epoch activity timestamp for SESSION (a row alist).
+Live sessions use their last event time; saved sessions their creation time."
+  (or (alist-get 'lastActive session) (alist-get 'createdAt session) 0))
+
+(defun dsh-bridge--relative-age (ts &optional now)
+  "Return a short age string for ms-epoch timestamp TS.
+NOW is the reference time in seconds (default: the current time)."
+  (let* ((now (or now (float-time)))
+         (secs (max 0 (- now (/ ts 1000.0)))))
+    (cond
+     ((< secs 60) "now")
+     ((< secs 3600) (format "%dm" (floor (/ secs 60))))
+     ((< secs 86400) (format "%dh" (floor (/ secs 3600))))
+     ((< secs (* 7 86400)) (format "%dd" (floor (/ secs 86400))))
+     (t (format-time-string "%Y-%m-%d" (/ ts 1000))))))
+
 ;;; Target helpers
 
 (defun dsh-bridge--target-label ()
-  "Label of the current target: the pinned session, or \"last-active\"."
-  (or dsh-bridge-target-session "last-active"))
+  "Label of the current target: the pinned session's label, or \"last-active\"."
+  (if dsh-bridge-target-session
+      (or (dsh-bridge--label-for-id dsh-bridge-target-session)
+          dsh-bridge-target-session)
+    "last-active"))
 
 (defun dsh-bridge--target-header ()
   "Header string for the dispatcher: the bridge name plus the target."
   (format "DSH Bridge · target: %s" (dsh-bridge--target-label)))
+
+(defun dsh-bridge--live-session-choices ()
+  "Return an alist of (LABEL . ID) for live sessions, or nil."
+  (mapcar (lambda (s) (cons (dsh-bridge--session-label s) (alist-get 'id s)))
+          (seq-filter (lambda (s) (alist-get 'live s))
+                      (dsh-bridge--fetch-sessions))))
 
 (defun dsh-bridge--read-session-override (prompt)
   "With a prefix argument, read a live session for one-shot use.
 Returns the chosen session id, or nil without a prefix argument (the caller
 then uses the pinned/last-active target)."
   (when current-prefix-arg
-    (let* ((sessions (seq-filter (lambda (s) (alist-get 'live s))
-                                 (dsh-bridge--fetch-sessions)))
-           (choices (mapcar (lambda (s) (alist-get 'id s)) sessions)))
+    (let ((choices (dsh-bridge--live-session-choices)))
       (if (null choices)
           (user-error "dsh-bridge: no live sessions")
-        (completing-read prompt choices nil t)))))
+        (cdr (assoc (completing-read prompt choices nil t) choices))))))
 
 (defun dsh-bridge--region-or-buffer ()
   "Return the region text if the region is active, else the whole buffer."
@@ -274,7 +350,7 @@ SESSION-ID overrides the pinned target for this call only."
            ((null alist)
             (message "dsh-bridge: unreadable response: %s" body))
            (t (message "dsh-bridge: sent to %s"
-                       (or (alist-get 'sessionId alist) target
+                       (or (dsh-bridge--label-from-response alist target)
                            "the last-active session")))))))))
 
 (defun dsh-bridge-send-draft (text &optional session-id)
@@ -294,7 +370,7 @@ SESSION-ID overrides the pinned target for this call only."
            ((null alist)
             (message "dsh-bridge: unreadable response: %s" body))
            (t (message "dsh-bridge: draft pushed to %s"
-                       (or (alist-get 'sessionId alist) target
+                       (or (dsh-bridge--label-from-response alist target)
                            "the active session")))))))))
 
 ;;; Shared letter->command table (dispatcher + view buffers)
@@ -338,7 +414,10 @@ so.  The inbox (a global log) leaves this nil and labels the target.")
   "Header line for the output/inbox buffers: provenance plus refresh time."
   (format "DSH Bridge · %s%s"
           (if dsh-bridge--view-content-session
-              (format "reply from: %s" dsh-bridge--view-content-session)
+              (format "reply from: %s"
+                      (or (dsh-bridge--label-for-id
+                           dsh-bridge--view-content-session)
+                          dsh-bridge--view-content-session))
             (format "target: %s" (dsh-bridge--target-label)))
           (if dsh-bridge--view-timestamp
               (format " · refreshed %s" dsh-bridge--view-timestamp)
@@ -426,7 +505,9 @@ With a prefix argument, fetch from a chosen session for this call only.
               (goto-char (point-min))))
           (pop-to-buffer "*dsh-bridge-output*")
           (message "dsh-bridge: fetched reply from %s"
-                   (or (alist-get 'sessionId alist) "last-active session"))))))))
+                   (or (dsh-bridge--label-from-response
+                        alist (alist-get 'sessionId alist))
+                       "last-active session"))))))))
 
 ;;;###autoload
 (defun dsh-bridge-inbox ()
@@ -541,7 +622,8 @@ draft, `C-c C-k' erases the buffer."
                    (format "HTTP %s" status))))
      (session-id
       (setq dsh-bridge-target-session session-id)
-      (message "dsh-bridge: targeting session %s" session-id))
+      (message "dsh-bridge: targeting session %s"
+               (or (dsh-bridge--label-for-id session-id) session-id)))
      (t
       (setq dsh-bridge-target-session nil)
       (message "dsh-bridge: targeting the last-active session")))))
@@ -568,12 +650,12 @@ draft, `C-c C-k' erases the buffer."
 SESSION-ID is a session id string, or nil to target the last-active session."
   (interactive
    (list
-    (let* ((sessions (seq-filter (lambda (s) (alist-get 'live s))
-                                 (dsh-bridge--fetch-sessions)))
-           (choices (append (mapcar (lambda (s) (alist-get 'id s)) sessions)
-                            '("(last-active)")))
-           (choice (completing-read "Target session: " choices nil t)))
-      (if (string= choice "(last-active)") nil choice))))
+    (let* ((choices (dsh-bridge--live-session-choices))
+           (choice (completing-read "Target session: "
+                                    (append choices '(("(last-active)" . nil)))
+                                    nil t)))
+      (if (string= choice "(last-active)") nil
+        (cdr (assoc choice choices))))))
   (let* ((result (dsh-bridge--request "POST" "/select"
                   (if session-id
                       `((sessionId . ,session-id))
@@ -593,7 +675,9 @@ SESSION-ID is a session id string, or nil to target the last-active session."
       (dsh-bridge--refresh-view-headers)
       (dsh-bridge--refresh-sessions-buffer)
       (message "dsh-bridge: targeting %s"
-               (or session-id "last-active session"))))))
+               (or (and session-id
+                        (or (dsh-bridge--label-for-id session-id) session-id))
+                   "last-active session"))))))
 
 ;;; The sessions buffer
 
@@ -602,22 +686,44 @@ SESSION-ID is a session id string, or nil to target the last-active session."
   "Face for the currently pinned session in `*dsh-bridge-sessions*'."
   :group 'dsh-bridge)
 
-(defun dsh-bridge--format-last-active (ts)
-  "Format ms-epoch timestamp TS for the session list, or nil when absent."
-  (and ts (format-time-string "%Y-%m-%d %H:%M" (/ ts 1000))))
-
 (defun dsh-bridge--session-cell (session)
-  "Session id cell for SESSION, marked when it is the pinned target."
-  (let ((id (alist-get 'id session)))
-    (if (equal id dsh-bridge-target-session)
-        (propertize (format "▶ %s" id) 'face 'dsh-bridge-current-target-face)
-      id)))
+  "Session label cell for SESSION, marked when it is the pinned target."
+  (let ((label (dsh-bridge--session-label session)))
+    (if (equal (alist-get 'id session) dsh-bridge-target-session)
+        (propertize (format "▶ %s" label) 'face 'dsh-bridge-current-target-face)
+      label)))
+
+(defun dsh-bridge--age-sorter (a b)
+  "Sort predicate for the Age column: ascending by activity timestamp.
+A and B are `tabulated-list' entries (ID COLS); the Age cell is a string
+carrying the raw ms-epoch timestamp in its `dsh-bridge-age-ts' text property."
+  (let* ((n (seq-position tabulated-list-format "Age"
+                           (lambda (e elt) (equal (car e) elt))))
+         (ta (get-text-property 0 'dsh-bridge-age-ts (aref (cadr a) n)))
+         (tb (get-text-property 0 'dsh-bridge-age-ts (aref (cadr b) n))))
+    (< ta tb)))
+
+(defun dsh-bridge--session-entry (session)
+  "Return a `tabulated-list' entry (ID . COLS) for SESSION (a row alist)."
+  (let* ((id (alist-get 'id session))
+         (live (alist-get 'live session))
+         (activity (dsh-bridge--session-activity session))
+         (age (propertize (dsh-bridge--relative-age activity)
+                          'dsh-bridge-age-ts activity))
+         (cols (vector (dsh-bridge--session-cell session)
+                       (if live "live" "saved")
+                       (or (alist-get 'cwd session) "")
+                       age)))
+    (when dsh-bridge-show-session-ids
+      (setq cols (vconcat cols (vector id))))
+    (list id cols)))
 
 (define-derived-mode dsh-bridge-sessions-mode tabulated-list-mode "DSH-Sessions"
   "Major mode for browsing DSH sessions.
 `RET' pins the session under point (live only), `u' unpins, `p' pins and pops
 to the prompt buffer, `f' peeks the session's latest reply without changing
-the pin, `g' re-fetches the list, `S' sorts by column.")
+the pin, `w' copies the session id under point, `D' describes the session,
+`g' re-fetches the list, `S' sorts by column.")
 
 (define-key dsh-bridge-sessions-mode-map (kbd "RET")
             #'dsh-bridge-select-session-at-point)
@@ -627,6 +733,10 @@ the pin, `g' re-fetches the list, `S' sorts by column.")
             #'dsh-bridge-select-session-at-point-and-prompt)
 (define-key dsh-bridge-sessions-mode-map (kbd "f")
             #'dsh-bridge-peek-session)
+(define-key dsh-bridge-sessions-mode-map (kbd "w")
+            #'dsh-bridge-copy-session-id)
+(define-key dsh-bridge-sessions-mode-map (kbd "D")
+            #'dsh-bridge-describe-session)
 
 (defun dsh-bridge-select-session-at-point ()
   "Select the DSH session shown on the current line of the session list."
@@ -635,7 +745,8 @@ the pin, `g' re-fetches the list, `S' sorts by column.")
     (when id
       (if (equal (aref (tabulated-list-get-entry) 1) "live")
           (dsh-bridge-select-session id)
-        (message "dsh-bridge: session %s is not live" id)))))
+        (message "dsh-bridge: session %s is not live"
+                 (or (dsh-bridge--label-for-id id) id))))))
 
 (defun dsh-bridge-unpin-session ()
   "Unpin the target session (the bridge targets the last-active session)."
@@ -650,7 +761,8 @@ the pin, `g' re-fetches the list, `S' sorts by column.")
         (progn
           (dsh-bridge-select-session id)
           (dsh-bridge-prompt))
-      (message "dsh-bridge: session %s is not live" id))))
+      (message "dsh-bridge: session %s is not live"
+               (or (dsh-bridge--label-for-id id) id)))))
 
 (defun dsh-bridge-peek-session ()
   "Fetch the session under point's latest reply into *dsh-bridge-output*.
@@ -661,6 +773,46 @@ dsh-bridge-fetch'."
     (if id
         (dsh-bridge-fetch id)
       (message "dsh-bridge: no session under point"))))
+
+(defun dsh-bridge-copy-session-id ()
+  "Copy the raw DSH session id under point to the kill ring."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+    (if id
+        (progn
+          (kill-new id)
+          (message "dsh-bridge: copied session id %s" id))
+      (message "dsh-bridge: no session under point"))))
+
+(defun dsh-bridge-describe-session ()
+  "Show details of the session under point, including its raw id."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+    (if (not id)
+        (message "dsh-bridge: no session under point")
+      (let* ((session (dsh-bridge--session-for-id id))
+             (buffer (get-buffer-create "*dsh-bridge-session-details*")))
+        (with-current-buffer buffer
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (format "Session id:   %s\n" id))
+            (when session
+              (insert (format "Label:        %s\n"
+                              (dsh-bridge--session-label session)))
+              (insert (format "State:        %s\n"
+                              (if (alist-get 'live session) "live" "saved")))
+              (insert (format "Directory:    %s\n"
+                              (or (alist-get 'cwd session) "")))
+              (let ((ts (or (alist-get 'lastActive session)
+                            (alist-get 'createdAt session))))
+                (insert (format "Last active:  %s\n"
+                                (if ts (format-time-string "%Y-%m-%d %H:%M:%S"
+                                                           (/ ts 1000))
+                                  "")))))
+            (goto-char (point-min))))
+        (with-current-buffer buffer
+          (special-mode))
+        (pop-to-buffer buffer)))))
 
 (defun dsh-bridge--list-sessions-in-buffer ()
   "Fill `*dsh-bridge-sessions*' with the current session list.
@@ -674,21 +826,17 @@ Returns non-nil when sessions were listed."
         ;; the session list from the host.
         (setq-local revert-buffer-function
                     (lambda (&rest _) (dsh-bridge--list-sessions-in-buffer)))
-        (setq tabulated-list-format [("Session" 45 t)
-                                     ("State" 8 t)
-                                     ("Cwd" 40 t)
-                                     ("Last active" 16 t)])
-        (setq tabulated-list-sort-key '("Last active" . t))
+        (setq tabulated-list-format
+              (let ((format [("Session" 45 t)
+                             ("State" 8 t)
+                             ("Cwd" 40 t)
+                             ("Age" 12 dsh-bridge--age-sorter)]))
+                (if dsh-bridge-show-session-ids
+                    (vconcat format [("Id" 40 t)])
+                  format)))
+        (setq tabulated-list-sort-key '("Age" . t))
         (setq tabulated-list-entries
-              (mapcar (lambda (s)
-                        (list (alist-get 'id s)
-                              (vector (dsh-bridge--session-cell s)
-                                      (if (alist-get 'live s) "live" "saved")
-                                      (or (alist-get 'cwd s) "")
-                                      (or (dsh-bridge--format-last-active
-                                           (alist-get 'lastActive s))
-                                          ""))))
-                      sessions))
+              (mapcar #'dsh-bridge--session-entry sessions))
         (tabulated-list-init-header)
         (tabulated-list-print))
       t)))
@@ -705,7 +853,8 @@ Returns non-nil when sessions were listed."
   "List DSH sessions in a tabulated buffer.
 In the session list: `RET' pins the session under point (live only), `u'
 unpins, `p' pins and pops to the prompt buffer, `f' peeks the session's
-latest reply without changing the pin, `g' re-fetches, `S' sorts by column."
+latest reply without changing the pin, `w' copies the session id, `D' shows
+session details, `g' re-fetches, `S' sorts by column."
   (interactive)
   (if (dsh-bridge--list-sessions-in-buffer)
       (pop-to-buffer "*dsh-bridge-sessions*")

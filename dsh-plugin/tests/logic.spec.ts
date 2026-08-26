@@ -10,27 +10,33 @@ import {
   mergeSessionRows,
   parseBearerAuthorization,
   resolveTargetId,
+  sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
   type LiveSessionLike,
   type MessageLike,
+  type SessionEventLike,
   type SessionHeaderLike,
 } from '../src/logic.ts'
 
-function liveSession(id: string, opts: { cwd?: string; createdAt?: number; eventTimes?: number[] } = {}): LiveSessionLike {
+function liveSession(id: string, opts: { cwd?: string; createdAt?: number; eventTimes?: number[]; events?: SessionEventLike[] } = {}): LiveSessionLike {
   return {
     id,
     header: { cwd: opts.cwd, createdAt: opts.createdAt ?? 0 },
-    events: (opts.eventTimes ?? []).map(time => ({ time })),
+    events: opts.events ?? (opts.eventTimes ?? []).map(time => ({ time })),
   }
 }
 
-function header(id: string, opts: { cwd?: string; createdAt?: number; origin?: string } = {}): SessionHeaderLike {
-  return { id, cwd: opts.cwd, createdAt: opts.createdAt ?? 0, origin: opts.origin }
+function header(id: string, opts: { cwd?: string; createdAt?: number; origin?: string; title?: string | null } = {}): SessionHeaderLike {
+  return { id, cwd: opts.cwd, createdAt: opts.createdAt ?? 0, origin: opts.origin, title: opts.title }
 }
 
 function message(role: string, blocks: Array<{ type: string; text?: string }>): MessageLike {
   return { role, content: blocks }
+}
+
+function titleEvent(title: string): SessionEventLike {
+  return { time: 1, type: 'session/title', data: { title } }
 }
 
 describe('latestAssistantText', () => {
@@ -86,7 +92,15 @@ describe('mergeSessionRows', () => {
       [liveSession('a', { createdAt: 10, eventTimes: [20, 30] })],
       [],
     )
-    expect(rows).toEqual([{ id: 'a', cwd: null, live: true, lastActive: 30, createdAt: 10 }])
+    expect(rows).toEqual([{ id: 'a', title: null, cwd: null, live: true, lastActive: 30, createdAt: 10 }])
+  })
+
+  it('folds the live title from the latest session/title event', () => {
+    const rows = mergeSessionRows(
+      [liveSession('a', { createdAt: 10, events: [titleEvent('first'), titleEvent('latest')] })],
+      [],
+    )
+    expect(rows[0]!.title).toBe('latest')
   })
 
   it('falls back to createdAt when a live session has no events', () => {
@@ -99,13 +113,47 @@ describe('mergeSessionRows', () => {
       [],
       [header('a', { createdAt: 1 }), header('sub', { origin: 'subagent' })],
     )
-    expect(rows).toEqual([{ id: 'a', cwd: null, live: false, createdAt: 1 }])
+    expect(rows).toEqual([{ id: 'a', title: null, cwd: null, live: false, createdAt: 1 }])
+  })
+
+  it('passes through a persisted title', () => {
+    const rows = mergeSessionRows([], [header('a', { createdAt: 1, title: 'saved title' })])
+    expect(rows[0]!.title).toBe('saved title')
   })
 
   it('dedupes persisted sessions that are already live', () => {
     const rows = mergeSessionRows([liveSession('a', { createdAt: 1 })], [header('a', { createdAt: 1 })])
     expect(rows).toHaveLength(1)
     expect(rows[0]!.live).toBe(true)
+  })
+})
+
+describe('sessionTitle', () => {
+  it('returns null when there are no events', () => {
+    expect(sessionTitle([])).toBeNull()
+  })
+
+  it('returns null when no session/title event exists', () => {
+    expect(sessionTitle([{ time: 1, type: 'user/message', data: {} }])).toBeNull()
+  })
+
+  it('returns the latest title (last-wins)', () => {
+    expect(sessionTitle([titleEvent('old'), titleEvent('new')])).toBe('new')
+  })
+
+  it('ignores non-title events interleaved with titles', () => {
+    expect(sessionTitle([
+      titleEvent('a'),
+      { time: 2, type: 'user/message', data: {} },
+      titleEvent('b'),
+    ])).toBe('b')
+  })
+
+  it('returns null for a malformed or empty title payload', () => {
+    expect(sessionTitle([{ time: 1, type: 'session/title' }])).toBeNull()
+    expect(sessionTitle([{ time: 1, type: 'session/title', data: null }])).toBeNull()
+    expect(sessionTitle([{ time: 1, type: 'session/title', data: { title: '' } }])).toBeNull()
+    expect(sessionTitle([{ time: 1, type: 'session/title', data: { title: 42 } }])).toBeNull()
   })
 })
 

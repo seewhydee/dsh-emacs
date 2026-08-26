@@ -46,10 +46,12 @@ import {
   mergeSessionRows,
   parseBearerAuthorization,
   resolveTargetId,
+  sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
   type LiveSessionLike,
   type ResolveTargetResult,
+  type SessionEventLike,
   type SessionHeaderLike,
   type SessionRow,
 } from './logic.ts'
@@ -72,9 +74,25 @@ interface SessionService {
   list(): Session[]
 }
 
-/** Minimal face of the `sessionPersistence` service: list materialized session headers. */
+/** Minimal face of the `sessionPersistence` service: list + inspect materialized sessions. */
 interface SessionPersistenceService {
   list(signal?: AbortSignal): Promise<SessionHeader[]>
+  inspect(id: string, signal?: AbortSignal): Promise<{ events: readonly SessionEventLike[] }>
+}
+
+/** Minimal face of one persisted projection-cache snapshot. */
+interface ProjectionSnapshotLike {
+  asOfSeq: number
+  values: Readonly<Record<string, unknown>>
+}
+
+/**
+ * Minimal face of the optional `sessionProjectionCache` service. Read via
+ * `ctx.get` — a profile without the cache simply yields undefined and the
+ * bridge falls back to `inspect` for cold titles.
+ */
+interface ProjectionCacheService {
+  cachedSnapshot(meta: SessionHeader): ProjectionSnapshotLike | undefined
 }
 
 /** The target of a bridge operation: a live session plus its live agent. */
@@ -206,17 +224,47 @@ export function apply(ctx: Context): void {
     return resolveTargetId(explicitId, selectedSessionId, targetableSessions(), hasAgent)
   }
 
+  /**
+   * Fold a cold session's title. The persisted projection cache serves the
+   * title with zero log reads (mirroring the harness's own session list); when
+   * the cache is absent, or its row lacks the title key, inspect the log and
+   * fold `session/title` events directly. Fail-soft: a title is a display
+   * nicety and must never hide the session row.
+   */
+  async function coldSessionTitle(
+    cache: ProjectionCacheService | undefined,
+    persistence: SessionPersistenceService,
+    header: SessionHeader,
+  ): Promise<string | null> {
+    const snapshot = cache?.cachedSnapshot(header)
+    if (snapshot !== undefined) {
+      const title = snapshot.values.title
+      if (typeof title === 'string' && title !== '') return title
+      // The title key is present with a null value: the session has no title
+      // yet, and a cold log is immutable, so it cannot acquire one. No inspect.
+      if (Object.hasOwn(snapshot.values, 'title')) return null
+    }
+    try {
+      const inspection = await persistence.inspect(header.id)
+      return sessionTitle(inspection.events)
+    } catch {
+      return null
+    }
+  }
+
   /** Merge live sessions with persisted headers via the pure merge logic. */
   async function listSessions(): Promise<SessionRow[]> {
+    const cache = ctx.get('sessionProjectionCache') as ProjectionCacheService | undefined
     let persisted: SessionHeaderLike[] = []
     try {
       const headers = await sessionPersistence.list()
-      persisted = headers.map((header): SessionHeaderLike => ({
+      persisted = await Promise.all(headers.map(async (header): Promise<SessionHeaderLike> => ({
         id: String(header.id),
         cwd: header.cwd,
         createdAt: header.createdAt,
         origin: header.origin,
-      }))
+        title: header.origin === 'subagent' ? null : await coldSessionTitle(cache, sessionPersistence, header),
+      })))
     } catch {
       // Persistence listing is auxiliary to the live view; a backend failure
       // must not hide the sessions that are actually running now.
@@ -324,7 +372,12 @@ export function apply(ctx: Context): void {
           for (const client of [...sseClients]) {
             try { client.write(event) } catch { sseClients.delete(client) }
           }
-          sendJson(res, 200, { ok: true, sessionId: result.id })
+          const target = targetById(result.id)
+          sendJson(res, 200, {
+            ok: true,
+            sessionId: result.id,
+            title: target === undefined ? null : sessionTitle(target.session.events),
+          })
         } catch (error: unknown) {
           sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         }
@@ -435,7 +488,11 @@ export function apply(ctx: Context): void {
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
           }))
-          sendJson(res, 200, { ok: true, sessionId: String(target.session.id) })
+          sendJson(res, 200, {
+            ok: true,
+            sessionId: String(target.session.id),
+            title: sessionTitle(target.session.events),
+          })
         } catch (error: unknown) {
           const status = error instanceof PayloadTooLargeError ? 413 : 500
           sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
@@ -456,6 +513,7 @@ export function apply(ctx: Context): void {
         }
         sendJson(res, 200, {
           sessionId: String(target.session.id),
+          title: sessionTitle(target.session.events),
           text: latestAssistantText(target.agent.session.deriveMessages()),
         })
         return
