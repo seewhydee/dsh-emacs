@@ -50,6 +50,7 @@ import {
   sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
+  userPrompts,
   workspaceTitlesBySession,
   type LiveSessionLike,
   type ResolveTargetResult,
@@ -537,6 +538,25 @@ export function apply(ctx: Context): void {
           sessionId: String(target.session.id),
           title: sessionTitle(target.session.events),
           text: latestAssistantText(target.agent.session.deriveMessages()),
+        })
+        return
+      }
+
+      // The prompt buffer's history: the session's user prompts, newest first.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/prompts') {
+        const result = resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+        if (result.kind === 'error') {
+          sendJson(res, result.status, { error: result.message })
+          return
+        }
+        const target = targetById(result.id)
+        if (target === undefined) {
+          sendJson(res, 404, { error: 'no active session' })
+          return
+        }
+        sendJson(res, 200, {
+          sessionId: String(target.session.id),
+          prompts: userPrompts(target.agent.session.deriveMessages()).reverse(),
         })
         return
       }

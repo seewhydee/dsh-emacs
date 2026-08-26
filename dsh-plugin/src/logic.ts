@@ -48,6 +48,25 @@ export function latestAssistantText(messages: readonly MessageLike[]): string {
 }
 
 /**
+ * The text of every user prompt, oldest first. The mirror image of
+ * `latestAssistantText`: reads the derived message view, keeps `user` role
+ * messages, joins their text blocks with newlines, and drops whitespace-only
+ * entries. Used by the prompt-buffer history.
+ */
+export function userPrompts(messages: readonly MessageLike[]): string[] {
+  const prompts: string[] = []
+  for (const message of messages) {
+    if (message.role !== 'user') continue
+    const text = message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text ?? '')
+      .join('\n')
+    if (text.trim() !== '') prompts.push(text)
+  }
+  return prompts
+}
+
+/**
  * Minimal structural face of one logged event, enough to fold a title and
  * last-activity time. `data` is deliberately `unknown`: the real `SessionEvent`
  * union satisfies this shape, and the title fold narrows the payload it reads.

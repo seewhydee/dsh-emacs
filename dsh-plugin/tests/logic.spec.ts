@@ -14,6 +14,7 @@ import {
   sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
+  userPrompts,
   workspaceTitlesBySession,
   type LiveSessionLike,
   type MessageLike,
@@ -72,6 +73,29 @@ describe('latestAssistantText', () => {
       message('assistant', [{ type: 'tool-call' }]),
     ]
     expect(latestAssistantText(messages)).toBe('real answer')
+  })
+})
+
+describe('userPrompts', () => {
+  it('returns user text blocks in order, skipping other roles', () => {
+    const messages = [
+      message('user', [{ type: 'text', text: 'first' }]),
+      message('assistant', [{ type: 'text', text: 'reply' }]),
+      message('user', [{ type: 'text', text: 'second' }]),
+    ]
+    expect(userPrompts(messages)).toEqual(['first', 'second'])
+  })
+
+  it('joins multiple text blocks with newlines and drops whitespace-only prompts', () => {
+    const messages = [
+      message('user', [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }]),
+      message('user', [{ type: 'text', text: '   ' }]),
+    ]
+    expect(userPrompts(messages)).toEqual(['a\nb'])
+  })
+
+  it('returns an empty list with no messages', () => {
+    expect(userPrompts([])).toEqual([])
   })
 })
 

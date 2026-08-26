@@ -558,6 +558,109 @@ then uses the pinned/last-active target)."
       (buffer-substring-no-properties (region-beginning) (region-end))
     (buffer-substring-no-properties (point-min) (point-max))))
 
+;;; Prompt history
+
+(defvar dsh-bridge--prompt-history nil
+  "Alist of (SESSION-ID . PROMPTS) for the prompt buffer's history.
+PROMPTS is a list of prompt strings, newest first.  The authoritative list
+comes from the host's `GET /prompts'; entries are prepended locally after
+sends so `M-p' sees the newest prompt without a refetch.")
+
+(defvar-local dsh-bridge--prompt-history-session nil
+  "Session id the prompt buffer's history refers to, or nil.")
+
+(defvar-local dsh-bridge--prompt-history-index nil
+  "Index into the current session's prompt list shown in the prompt buffer.
+nil means the buffer holds the draft (most recent content); 0 is the newest
+prompt.")
+
+(defvar-local dsh-bridge--prompt-draft nil
+  "The unsent buffer content saved when browsing prompt history, or nil.")
+
+(defun dsh-bridge--prompt-history-list ()
+  "Return the cached prompt list (newest first) for the history session."
+  (and dsh-bridge--prompt-history-session
+       (cdr (assoc dsh-bridge--prompt-history-session dsh-bridge--prompt-history))))
+
+(defun dsh-bridge--prompt-history-refresh ()
+  "Return the prompt list (newest first) for the current target session.
+Fetches `GET /prompts' when the buffer is not already browsing a history for
+the pinned session: on first use, when the pin changed, or while unpinned (the
+last-active session may have moved).  Within an ongoing navigation the cached
+list is reused, so `M-p'/`M-n' browse a stable list."
+  (when (null dsh-bridge--prompt-history-index)
+    (let ((pin dsh-bridge-target-session))
+      (when (or (null dsh-bridge--prompt-history-session)
+                (not (equal pin dsh-bridge--prompt-history-session)))
+        (let* ((path (dsh-bridge--path "/prompts" pin))
+               (result (dsh-bridge--request "GET" path nil))
+               (alist (cdr result))
+               (session-id (and alist (alist-get 'sessionId alist))))
+          (when session-id
+            (setq dsh-bridge--prompt-history
+                  (assoc-delete-all session-id dsh-bridge--prompt-history))
+            (push (cons session-id (or (alist-get 'prompts alist) '()))
+                  dsh-bridge--prompt-history)
+            (setq-local dsh-bridge--prompt-history-session session-id)
+            (setq-local dsh-bridge--prompt-draft nil))))))
+  (dsh-bridge--prompt-history-list))
+
+(defun dsh-bridge--prompt-show-history (text)
+  "Replace the prompt buffer's content with TEXT, point at the end."
+  (erase-buffer)
+  (insert text)
+  (goto-char (point-max)))
+
+(defun dsh-bridge-prompt-previous-history ()
+  "Replace the prompt buffer with the previous prompt sent to the target session.
+The current (unsent) content is saved so `dsh-bridge-prompt-next-history' can
+restore it; `M-n' walks back toward the draft."
+  (interactive)
+  (let ((prompts (dsh-bridge--prompt-history-refresh)))
+    (if (null prompts)
+        (message "dsh-bridge: no prompts in this session's history")
+      (if (null dsh-bridge--prompt-history-index)
+          (progn
+            (setq-local dsh-bridge--prompt-draft (buffer-string))
+            (setq-local dsh-bridge--prompt-history-index 0)
+            (dsh-bridge--prompt-show-history (car prompts)))
+        (let ((next (1+ dsh-bridge--prompt-history-index)))
+          (if (>= next (length prompts))
+              (message "dsh-bridge: at the oldest prompt")
+            (setq-local dsh-bridge--prompt-history-index next)
+            (dsh-bridge--prompt-show-history (nth next prompts))))))))
+
+(defun dsh-bridge-prompt-next-history ()
+  "Move the prompt buffer forward through the session's prompt history.
+At the newest prompt, restore the draft saved by
+`dsh-bridge-prompt-previous-history'."
+  (interactive)
+  (if (null dsh-bridge--prompt-history-index)
+      (message "dsh-bridge: no newer prompts")
+    (if (zerop dsh-bridge--prompt-history-index)
+        (progn
+          (setq-local dsh-bridge--prompt-history-index nil)
+          (dsh-bridge--prompt-show-history (or dsh-bridge--prompt-draft "")))
+      (let ((index (1- dsh-bridge--prompt-history-index)))
+        (setq-local dsh-bridge--prompt-history-index index)
+        (dsh-bridge--prompt-show-history
+         (nth index (dsh-bridge--prompt-history-list)))))))
+
+(defun dsh-bridge--prompt-history-record-send (session-id text)
+  "Record a just-sent TEXT to SESSION-ID in the prompt history cache.
+Also returns the prompt buffer to the draft slot (the sent text is now the
+newest prompt)."
+  (when session-id
+    (let ((entry (assoc session-id dsh-bridge--prompt-history)))
+      (if entry
+          (setcdr entry (cons text (cdr entry)))
+        (push (cons session-id (list text)) dsh-bridge--prompt-history))))
+  (when (buffer-live-p (get-buffer "*dsh-bridge-prompt*"))
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (when (eq major-mode 'dsh-bridge-prompt-mode)
+        (setq-local dsh-bridge--prompt-history-index nil)
+        (setq-local dsh-bridge--prompt-draft nil)))))
+
 ;;; Text senders (internal)
 
 (defun dsh-bridge-send-text (text &optional session-id)
@@ -578,7 +681,9 @@ SESSION-ID overrides the pinned target for this call only."
             (message "dsh-bridge: unreadable response: %s" body))
            (t (message "dsh-bridge: sent to %s"
                        (or (dsh-bridge--label-from-response alist target)
-                           "the last-active session")))))))))
+                           "the last-active session"))
+              (dsh-bridge--prompt-history-record-send
+               (alist-get 'sessionId alist) text))))))))
 
 (defun dsh-bridge-send-draft (text &optional session-id)
   "Send TEXT to the DSH composer as a draft (not submitted).
@@ -835,7 +940,7 @@ and the ack redelivers them on the next pull (duplicates, not loss).
   "Pop to the persistent prompt-editing buffer `*dsh-bridge-prompt*'.
 ACTION, when non-nil, is a `display-buffer' action passed to `pop-to-buffer'.
 The text survives sends, so a prompt can be edited and resubmitted; `C-c C-k'
-erases the buffer."
+erases the buffer; `M-p'/`M-n' recall earlier prompts sent to the session."
   (interactive)
   (pop-to-buffer (dsh-bridge--prompt-buffer) action))
 
@@ -880,7 +985,9 @@ into the mode metadata and the docstring generation calls `symbol-name' on it
      "Major mode for composing DSH prompts.
 `C-c C-c' sends the region or whole buffer (the buffer is not cleared, so
 text survives for edit-and-resubmit), `C-c C-d' pushes it as a composer
-draft, `C-c C-k' erases the buffer."
+draft, `C-c C-k' erases the buffer.  `M-p' and `M-n' walk the session's
+prompt history, recalling earlier prompts (the current draft is restored by
+`M-n' at the newest prompt)."
      (dsh-bridge--prompt-mode-setup)))
 
 ;; The map is created by whichever branch of the `if' runs; declare it here so
@@ -894,6 +1001,10 @@ draft, `C-c C-k' erases the buffer."
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-c") #'dsh-bridge-send)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-d") #'dsh-bridge-draft)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-k") #'dsh-bridge-erase-prompt)
+(define-key dsh-bridge-prompt-mode-map (kbd "M-p")
+            #'dsh-bridge-prompt-previous-history)
+(define-key dsh-bridge-prompt-mode-map (kbd "M-n")
+            #'dsh-bridge-prompt-next-history)
 
 (defun dsh-bridge-erase-prompt ()
   "Erase the contents of the prompt buffer."
@@ -909,6 +1020,13 @@ draft, `C-c C-k' erases the buffer."
      :help "Send the region (or whole buffer) to the DSH composer as a draft"]
     ["Erase Prompt" dsh-bridge-erase-prompt
      :help "Clear the prompt buffer"]
+    "---"
+    ["Previous Prompt" dsh-bridge-prompt-previous-history
+     :keys "M-p"
+     :help "Recall the previous prompt sent to this session"]
+    ["Next Prompt" dsh-bridge-prompt-next-history
+     :keys "M-n"
+     :help "Move forward through the prompt history"]
     "---"
     ["Select Session…" dsh-bridge-select-session
      :help "Pin the target session"]

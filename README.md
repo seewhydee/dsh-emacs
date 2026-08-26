@@ -103,7 +103,9 @@ From Emacs:
   reported when no browser client is connected at all.
 - `M-x dsh-bridge-prompt` — pop to the persistent prompt-editing buffer, the
   compose half of the loop; `C-c C-c` sends, `C-c C-d` drafts, `C-c C-k`
-  erases, and the text survives sends for edit-and-resubmit.
+  erases, and the text survives sends for edit-and-resubmit.  `M-p`/`M-n`
+  walk the target session's prompt history, recalling earlier prompts (the
+  current draft is restored by `M-n` at the newest prompt).
 - `M-x dsh-bridge-fetch` — fetch the latest DSH assistant reply into
   `*dsh-bridge-output*`.
 - `M-x dsh-bridge-inbox` — pull messages sent from DSH (e.g. via the
