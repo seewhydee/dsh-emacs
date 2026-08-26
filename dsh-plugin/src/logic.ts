@@ -107,6 +107,8 @@ export interface SessionRow {
   createdAt: number
   /** Display name of the workspace the session belongs to, when one is known. */
   workspace?: string | null
+  /** Whether the workspace registry hides the session from grouping surfaces. */
+  archived?: boolean
 }
 
 /** Minimal structural face of one workspace, enough for a session->title map. */

@@ -106,6 +106,7 @@ interface ProjectionCacheService {
  */
 interface WorkspaceRegistryService {
   list(): WorkspaceLike[]
+  archivedSessionIds: readonly string[]
 }
 
 /** The target of a bridge operation: a live session plus its live agent. */
@@ -286,7 +287,12 @@ export function apply(ctx: Context): void {
     const rows = mergeSessionRows(targetableSessions(), persisted)
     const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
     const workspaceBySession = workspaceTitlesBySession(workspaceRegistry?.list() ?? [])
-    return rows.map(row => ({ ...row, workspace: workspaceBySession.get(row.id) ?? null }))
+    const archivedIds = new Set((workspaceRegistry?.archivedSessionIds ?? []).map(id => String(id)))
+    return rows.map(row => ({
+      ...row,
+      workspace: workspaceBySession.get(row.id) ?? null,
+      archived: archivedIds.has(row.id),
+    }))
   }
 
   /** Whether a request carries the shared token as a bearer credential. */
@@ -394,6 +400,7 @@ export function apply(ctx: Context): void {
             ok: true,
             sessionId: result.id,
             title: target === undefined ? null : sessionTitle(target.session.events),
+            cwd: target === undefined ? null : (target.session.header.cwd ?? null),
           })
         } catch (error: unknown) {
           sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
@@ -515,6 +522,7 @@ export function apply(ctx: Context): void {
             ok: true,
             sessionId: String(target.session.id),
             title: sessionTitle(target.session.events),
+            cwd: target.session.header.cwd ?? null,
           })
         } catch (error: unknown) {
           const status = error instanceof PayloadTooLargeError ? 413 : 500
@@ -537,6 +545,7 @@ export function apply(ctx: Context): void {
         sendJson(res, 200, {
           sessionId: String(target.session.id),
           title: sessionTitle(target.session.events),
+          cwd: target.session.header.cwd ?? null,
           text: latestAssistantText(target.agent.session.deriveMessages()),
         })
         return

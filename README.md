@@ -105,9 +105,11 @@ From Emacs:
   compose half of the loop; `C-c C-c` sends, `C-c C-d` drafts, `C-c C-k`
   erases, and the text survives sends for edit-and-resubmit.  `M-p`/`M-n`
   walk the target session's prompt history, recalling earlier prompts (the
-  current draft is restored by `M-n` at the newest prompt).
+  current draft is restored by `M-n` at the newest prompt).  The buffer's
+  `default-directory` follows the target session's workspace.
 - `M-x dsh-bridge-fetch` — fetch the latest DSH assistant reply into
-  `*dsh-bridge-output*`.
+  `*dsh-bridge-output*`.  The buffer's `default-directory` is set to the
+  workspace of the session the reply came from.
 - `M-x dsh-bridge-inbox` — pull messages sent from DSH (e.g. via the
   "Send to Emacs" button on assistant messages in the web UI) into
   `*dsh-bridge-inbox*`.
@@ -115,7 +117,8 @@ From Emacs:
   `*dsh-bridge-sessions*` buffer, sorted by age; shows a pin-marker column
   (`*` for the pinned session), a running-marker column (`…` while a session's
   model is working), the session name, its age, and its workspace.
-  Live sessions are listed by default; `v` toggles saved (cold) sessions.
+  All non-archived sessions (live and saved) are listed by default; `v` cycles
+  the display mode (`live+saved` → `live` → `live+saved+archived`).
   `RET` pins the session under point (live only), `u` unpins, `p` pins and
   opens the prompt buffer, `f` peeks the session's latest reply without
   changing the pin, `w` copies the session id, `D` shows session details.

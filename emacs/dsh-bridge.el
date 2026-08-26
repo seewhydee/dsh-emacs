@@ -120,11 +120,14 @@ show only friendly labels.  Enable this for debugging."
   :type 'boolean
   :group 'dsh-bridge)
 
-(defcustom dsh-bridge-sessions-show-saved nil
-  "When non-nil, `*dsh-bridge-sessions*' also lists saved (cold) sessions.
-By default only live sessions are listed; `v' toggles this for the current
-buffer."
-  :type 'boolean
+(defcustom dsh-bridge-sessions-display 'live-saved
+  "Default session display mode for `*dsh-bridge-sessions*'.
+`live-saved' (the default) shows live and saved (cold) sessions but excludes
+archived ones; `live' shows only live sessions; `all' shows everything,
+including archived sessions.  `v' cycles the mode for the current buffer."
+  :type '(choice (const :tag "Live + saved (exclude archived)" live-saved)
+                 (const :tag "Live only" live)
+                 (const :tag "Live + saved + archived" all))
   :group 'dsh-bridge)
 
 (defvar dsh-bridge-target-session nil
@@ -136,10 +139,10 @@ Set with `dsh-bridge-select-session'.")
 Kept so an id can be turned back into its display label without an extra HTTP
 request.")
 
-(defvar-local dsh-bridge--show-saved nil
-  "Whether `*dsh-bridge-sessions*' lists saved (cold) sessions.
-Initialized from `dsh-bridge-sessions-show-saved' when the buffer is created;
-`v' toggles it.")
+(defvar-local dsh-bridge--sessions-display 'live-saved
+  "Session display mode for `*dsh-bridge-sessions*'.
+One of `live-saved' (default), `live', or `all'; initialized from
+`dsh-bridge-sessions-display' when the buffer is created and cycled by `v'.")
 
 ;;; Low-level HTTP plumbing
 
@@ -480,6 +483,22 @@ else the raw id."
   "Whether the cached session ID is live (has a running agent)."
   (alist-get 'live (dsh-bridge--session-for-id id)))
 
+(defun dsh-bridge--session-cwd (id)
+  "Return the cached working directory for session ID, or nil."
+  (let ((session (dsh-bridge--session-for-id id)))
+    (and session (alist-get 'cwd session))))
+
+(defun dsh-bridge--apply-session-directory (session-id cwd &optional buffer)
+  "Set BUFFER's `default-directory' to SESSION-ID's workspace.
+CWD, when non-nil, overrides the sessions-cache lookup for SESSION-ID.  Leaves
+the directory alone when no cwd is known or BUFFER is not live.  BUFFER is a
+buffer name or buffer, defaulting to the current buffer."
+  (let* ((buf (or buffer (current-buffer)))
+         (dir (or cwd (and session-id (dsh-bridge--session-cwd session-id)))))
+    (when (and dir (buffer-live-p (get-buffer buf)))
+      (with-current-buffer buf
+        (setq default-directory (file-name-as-directory dir))))))
+
 (defun dsh-bridge--label-for-id (id)
   "Return the display label for session ID, or nil when unknown."
   (let ((session (dsh-bridge--session-for-id id)))
@@ -683,7 +702,10 @@ SESSION-ID overrides the pinned target for this call only."
                        (or (dsh-bridge--label-from-response alist target)
                            "the last-active session"))
               (dsh-bridge--prompt-history-record-send
-               (alist-get 'sessionId alist) text))))))))
+               (alist-get 'sessionId alist) text)
+              (dsh-bridge--apply-session-directory
+               (alist-get 'sessionId alist) (alist-get 'cwd alist)
+               "*dsh-bridge-prompt*"))))))))
 
 (defun dsh-bridge-send-draft (text &optional session-id)
   "Send TEXT to the DSH composer as a draft (not submitted).
@@ -703,7 +725,10 @@ SESSION-ID overrides the pinned target for this call only."
             (message "dsh-bridge: unreadable response: %s" body))
            (t (message "dsh-bridge: draft pushed to %s"
                        (or (dsh-bridge--label-from-response alist target)
-                           "the active session")))))))))
+                           "the active session"))
+              (dsh-bridge--apply-session-directory
+               (alist-get 'sessionId alist) (alist-get 'cwd alist)
+               "*dsh-bridge-prompt*"))))))))
 
 ;;; Shared letter->command table (dispatcher + view buffers)
 
@@ -874,10 +899,20 @@ With a prefix argument, fetch from a chosen session for this call only.
             (setq-local dsh-bridge--view-timestamp
                         (format-time-string "%H:%M:%S"))
             (setq header-line-format (dsh-bridge--view-header-line))
+            ;; The reply buffer follows the workspace of the session it shows.
+            (dsh-bridge--apply-session-directory
+             dsh-bridge--view-content-session (alist-get 'cwd alist)
+             (current-buffer))
             (let ((inhibit-read-only t))
               (erase-buffer)
               (insert (or (cdr (assoc 'text alist)) ""))
               (goto-char (point-min))))
+          ;; A normal (non-override) fetch targets the same session the prompt
+          ;; buffer will send to, so its workspace follows too.
+          (when (null session-id)
+            (dsh-bridge--apply-session-directory
+             (or (alist-get 'sessionId alist) dsh-bridge-target-session)
+             (alist-get 'cwd alist) "*dsh-bridge-prompt*"))
           (pop-to-buffer "*dsh-bridge-output*")
           (message "dsh-bridge: fetched reply from %s"
                    (or (dsh-bridge--label-from-response
@@ -932,7 +967,10 @@ and the ack redelivers them on the next pull (duplicates, not loss).
   (let ((buffer (get-buffer-create "*dsh-bridge-prompt*")))
     (with-current-buffer buffer
       (unless (eq major-mode 'dsh-bridge-prompt-mode)
-        (dsh-bridge-prompt-mode)))
+        (dsh-bridge-prompt-mode))
+      ;; Compose in the pinned session's workspace when it is known.
+      (dsh-bridge--apply-session-directory
+       dsh-bridge-target-session nil (current-buffer)))
     buffer))
 
 ;;;###autoload
@@ -1106,6 +1144,8 @@ SESSION-ID is a session id string, or nil to target the last-active session."
       (setq dsh-bridge-target-session session-id)
       (dsh-bridge--refresh-view-headers)
       (dsh-bridge--refresh-sessions-buffer)
+      ;; The prompt buffer composes in the newly pinned session's workspace.
+      (dsh-bridge--apply-session-directory session-id nil "*dsh-bridge-prompt*")
       (message "dsh-bridge: targeting %s"
                (or (and session-id
                         (or (dsh-bridge--label-for-id session-id) session-id))
@@ -1159,10 +1199,19 @@ carrying the raw ms-epoch timestamp in its `dsh-bridge-age-ts' text property."
          (tb (get-text-property 0 'dsh-bridge-age-ts (aref (cadr b) n))))
     (< ta tb)))
 
+(defun dsh-bridge--session-visible-p (session)
+  "Whether SESSION is shown in the current session display mode.
+`live-saved' excludes archived sessions; `live' also requires the session to be
+live; `all' shows everything."
+  (pcase dsh-bridge--sessions-display
+    ('all t)
+    ('live (and (alist-get 'live session)
+                (not (alist-get 'archived session))))
+    (_ (not (alist-get 'archived session)))))
+
 (defun dsh-bridge--session-entry (session)
   "Return a `tabulated-list' entry (ID . COLS) for SESSION (a row alist)."
-  (let* ((id (alist-get 'id session))
-         (activity (dsh-bridge--session-activity session))
+  (let* ((id (alist-get 'id session))         (activity (dsh-bridge--session-activity session))
          (age (propertize (dsh-bridge--relative-age activity)
                           'dsh-bridge-age-ts activity))
          (workspace (dsh-bridge--workspace-label session))
@@ -1183,9 +1232,10 @@ carrying the raw ms-epoch timestamp in its `dsh-bridge-age-ts' text property."
   "Major mode for browsing DSH sessions.
 `RET' pins the session under point (live only), `u' unpins, `p' pins and pops
 to the prompt buffer, `f' peeks the session's latest reply without changing
-the pin, `v' toggles saved sessions, `w' copies the session id under point,
-`D' describes the session, `g' re-fetches the list, `S' sorts by column."
-  (setq-local dsh-bridge--show-saved dsh-bridge-sessions-show-saved))
+the pin, `v' cycles the display mode (live+saved, live, all), `w' copies the
+session id under point, `D' describes the session, `g' re-fetches the list,
+`S' sorts by column."
+  (setq-local dsh-bridge--sessions-display dsh-bridge-sessions-display))
 
 (define-key dsh-bridge-sessions-mode-map (kbd "RET")
             #'dsh-bridge-select-session-at-point)
@@ -1196,7 +1246,7 @@ the pin, `v' toggles saved sessions, `w' copies the session id under point,
 (define-key dsh-bridge-sessions-mode-map (kbd "f")
             #'dsh-bridge-peek-session)
 (define-key dsh-bridge-sessions-mode-map (kbd "v")
-            #'dsh-bridge-toggle-saved-sessions)
+            #'dsh-bridge-toggle-sessions-display)
 (define-key dsh-bridge-sessions-mode-map (kbd "w")
             #'dsh-bridge-copy-session-id)
 (define-key dsh-bridge-sessions-mode-map (kbd "D")
@@ -1213,8 +1263,8 @@ the pin, `v' toggles saved sessions, `w' copies the session id under point,
      :help "Unpin the target (use last-active)"]
     ["Peek Reply" dsh-bridge-peek-session
      :help "Fetch the session's latest reply without pinning"]
-    ["Toggle Saved Sessions" dsh-bridge-toggle-saved-sessions
-     :help "Show or hide saved (cold) sessions"]
+    ["Cycle Display Mode" dsh-bridge-toggle-sessions-display
+     :help "Cycle live+saved, live, then live+saved+archived"]
     ["Copy Session Id" dsh-bridge-copy-session-id
      :help "Copy the session id under point"]
     ["Describe Session" dsh-bridge-describe-session
@@ -1264,13 +1314,24 @@ dsh-bridge-fetch'."
         (dsh-bridge-fetch id)
       (message "dsh-bridge: no session under point"))))
 
-(defun dsh-bridge-toggle-saved-sessions ()
-  "Toggle showing saved (cold) sessions in `*dsh-bridge-sessions*'."
+(defun dsh-bridge--sessions-display-label ()
+  "Human label for the current session display mode."
+  (cdr (assq dsh-bridge--sessions-display
+             '((live-saved . "live+saved")
+               (live . "live")
+               (all . "live+saved+archived")))))
+
+(defun dsh-bridge-toggle-sessions-display ()
+  "Cycle the session list display mode (live+saved, live, all)."
   (interactive)
-  (setq dsh-bridge--show-saved (not dsh-bridge--show-saved))
+  (setq dsh-bridge--sessions-display
+        (pcase dsh-bridge--sessions-display
+          ('live-saved 'live)
+          ('live 'all)
+          (_ 'live-saved)))
   (dsh-bridge--list-sessions-in-buffer)
-  (message "dsh-bridge: %s saved sessions"
-           (if dsh-bridge--show-saved "showing" "hiding")))
+  (message "dsh-bridge: showing %s sessions"
+           (dsh-bridge--sessions-display-label)))
 
 (defun dsh-bridge-copy-session-id ()
   "Copy the raw DSH session id under point to the kill ring."
@@ -1337,9 +1398,7 @@ Returns non-nil when sessions were listed."
         (setq tabulated-list-sort-key '("Age" . t))
         (setq tabulated-list-entries
               (mapcar #'dsh-bridge--session-entry
-                      (if dsh-bridge--show-saved
-                          sessions
-                        (seq-filter (lambda (s) (alist-get 'live s)) sessions))))
+                      (seq-filter #'dsh-bridge--session-visible-p sessions)))
         (tabulated-list-init-header)
         (tabulated-list-print))
       t)))
@@ -1402,14 +1461,6 @@ the target session, `l' lists sessions."
 
 (easy-menu-add-item nil '("Tools") dsh-bridge-menu)
 
-;;; Back-compat: the pre-interface command names, obsolete for one cycle.
-
-(define-obsolete-function-alias 'dsh-bridge-send-region 'dsh-bridge-send "0.1.0")
-(define-obsolete-function-alias 'dsh-bridge-send-buffer 'dsh-bridge-send "0.1.0")
-(define-obsolete-function-alias 'dsh-bridge-get-output 'dsh-bridge-fetch "0.1.0")
-(define-obsolete-function-alias 'dsh-bridge-pull-inbox 'dsh-bridge-inbox "0.1.0")
-(define-obsolete-function-alias 'dsh-bridge-send-draft-region 'dsh-bridge-draft "0.1.0")
-(define-obsolete-function-alias 'dsh-bridge-send-draft-buffer 'dsh-bridge-draft "0.1.0")
-
 (provide 'dsh-bridge)
+
 ;;; dsh-bridge.el ends here

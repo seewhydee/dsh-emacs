@@ -312,6 +312,62 @@ not the pinned target."
       (should-not (string-match-p "target: s1"
                                   (format "%s" header-line-format))))))
 
+(ert-deftest dsh-bridge-apply-session-directory ()
+  "The helper sets default-directory (trailing slash), with cache fallback."
+  (with-temp-buffer
+    (dsh-bridge--apply-session-directory "s1" "/home/user/proj")
+    (should (equal default-directory "/home/user/proj/")))
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/cache/dir")))))
+    (with-temp-buffer
+      (dsh-bridge--apply-session-directory "s1" nil)
+      (should (equal default-directory "/cache/dir/"))))
+  (with-temp-buffer
+    (let ((before default-directory))
+      (dsh-bridge--apply-session-directory "s1" nil)
+      (should (equal default-directory before)))))
+
+(ert-deftest dsh-bridge-fetch-sets-output-directory ()
+  "Fetch sets the output buffer's default-directory to the session cwd."
+  (let ((dsh-bridge-target-session "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil
+                          "{\"text\":\"reply\",\"sessionId\":\"s1\",\"cwd\":\"/w/sess1\"}"
+                          200))))
+      (dsh-bridge-fetch))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal default-directory "/w/sess1/")))))
+
+(ert-deftest dsh-bridge-send-text-sets-prompt-directory ()
+  "A successful send sets the prompt buffer's directory to the session cwd."
+  (let ((dsh-bridge-target-session "s1")
+        (buf (get-buffer-create "*dsh-bridge-prompt*")))
+    (with-current-buffer buf
+      (dsh-bridge-prompt-mode))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil
+                          "{\"ok\":true,\"sessionId\":\"s1\",\"cwd\":\"/w/sess1\",\"title\":\"T\"}"
+                          200))))
+      (dsh-bridge-send-text "hello"))
+    (with-current-buffer buf
+      (should (equal default-directory "/w/sess1/")))
+    (kill-buffer buf)))
+
+(ert-deftest dsh-bridge-select-session-sets-prompt-directory ()
+  "Selecting a session sets the prompt buffer's directory from the cache."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/w/sess1") (live . t))))
+        (buf (get-buffer-create "*dsh-bridge-prompt*")))
+    (with-current-buffer buf
+      (dsh-bridge-prompt-mode))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload)
+                 (cons 200 (list (cons 'ok t))))))
+      (dsh-bridge-select-session "s1"))
+    (with-current-buffer buf
+      (should (equal default-directory "/w/sess1/")))
+    (kill-buffer buf)))
+
 (ert-deftest dsh-bridge-view-mode-basics ()
   "The view mode is read-only and binds the dispatcher's letters plus g/q/h."
   (with-temp-buffer
@@ -475,8 +531,7 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
   "The session list shows marker/R/Session/Age/Workspace columns."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-target-session "live-1")
-        (dsh-bridge-sessions-show-saved t))
+  (let ((dsh-bridge-target-session "live-1"))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  '(((id . "live-1") (live . t) (running . t) (title . "First live")
@@ -537,24 +592,56 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
              (cells (cadr (assoc "live-1" entries))))
         (should (equal (aref cells 5) "live-1"))))))
 
-(ert-deftest dsh-bridge-list-sessions-hides-saved-by-default ()
-  "Saved sessions are hidden by default and revealed by the toggle."
+(ert-deftest dsh-bridge-sessions-display-modes ()
+  "Display modes cycle live+saved, live, and live+saved+archived."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-target-session nil)
-        (dsh-bridge-sessions-show-saved nil))
+  (let ((dsh-bridge-target-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  '(((id . "live-1") (live . t) (cwd . "/a"))
-                   ((id . "saved-1") (live . nil) (cwd . "/b")))))
+                   ((id . "saved-1") (live . nil) (cwd . "/b"))
+                   ((id . "arch-1") (live . nil) (archived . t) (cwd . "/c")))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions)
       (let ((buf (get-buffer "*dsh-bridge-sessions*")))
-        (should (assoc "live-1" (buffer-local-value 'tabulated-list-entries buf)))
-        (should-not (assoc "saved-1" (buffer-local-value 'tabulated-list-entries buf)))
-        (with-current-buffer buf
-          (dsh-bridge-toggle-saved-sessions))
-        (should (assoc "saved-1" (buffer-local-value 'tabulated-list-entries buf)))))))
+        ;; Default (live+saved): live + saved shown, archived excluded.
+        (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
+          (should (assoc "live-1" entries))
+          (should (assoc "saved-1" entries))
+          (should-not (assoc "arch-1" entries)))
+        ;; Cycle -> live: only live.
+        (with-current-buffer buf (dsh-bridge-toggle-sessions-display))
+        (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
+          (should (assoc "live-1" entries))
+          (should-not (assoc "saved-1" entries))
+          (should-not (assoc "arch-1" entries)))
+        ;; Cycle -> all: everything, including archived.
+        (with-current-buffer buf (dsh-bridge-toggle-sessions-display))
+        (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
+          (should (assoc "live-1" entries))
+          (should (assoc "saved-1" entries))
+          (should (assoc "arch-1" entries)))
+        ;; Cycle again -> back to live+saved.
+        (with-current-buffer buf (dsh-bridge-toggle-sessions-display))
+        (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
+          (should (assoc "live-1" entries))
+          (should (assoc "saved-1" entries))
+          (should-not (assoc "arch-1" entries)))))))
+
+(ert-deftest dsh-bridge-session-visible-p ()
+  "Visibility depends on the display mode, live state, and archived flag."
+  (let ((dsh-bridge--sessions-display 'live-saved))
+    (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))
+    (should (dsh-bridge--session-visible-p '((live . nil) (cwd . "/b"))))
+    (should-not (dsh-bridge--session-visible-p '((live . nil) (archived . t)))))
+  (let ((dsh-bridge--sessions-display 'live))
+    (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))
+    (should-not (dsh-bridge--session-visible-p '((live . nil) (cwd . "/b"))))
+    (should-not (dsh-bridge--session-visible-p '((live . t) (archived . t)))))
+  (let ((dsh-bridge--sessions-display 'all))
+    (should (dsh-bridge--session-visible-p '((live . nil) (archived . t))))
+    (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))))
 
 (ert-deftest dsh-bridge-session-label-precedence ()
   "The label is the title, else the cwd basename, else the raw id."
