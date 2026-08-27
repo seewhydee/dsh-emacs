@@ -76,9 +76,10 @@ ERT for the Elisp helpers (`emacs --batch`).
 
 ## Build & mount
 
-- Plugin build: `cd dsh-plugin && pnpm build` → ESM `lib/index.js` (host) +
-  CJS `lib/client.js` (browser, hand-rolled `tsdown.client.config.ts` emitting
-  the factory-form bundle per the harness's client-artifact contract).
+- Plugin build: `make build` (installs deps if needed; falls back to direct
+  tsdown when pnpm refuses a symlinked `node_modules`) → ESM `lib/index.js`
+  (host) + CJS `lib/client.js` (browser, hand-rolled `tsdown.client.config.ts`
+  emitting the factory-form bundle per the harness's client-artifact contract).
 - Install (dev): `dsh plugin --profile web add link:<abs path to dsh-plugin>`,
   restart `dsh web` (see README for the source-checkout variant).
 - Install (packaged): `make package` → `dsh-bridge-<version>.tar` (Emacs

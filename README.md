@@ -31,19 +31,13 @@ manually:
 From this repository's root directory:
 
 ```sh
-cd dsh-plugin
-pnpm install   # first time only
-pnpm build     # emits lib/index.js (host) + lib/client.js (browser)
+make build   # emits dsh-plugin/lib/index.js (host) + lib/client.js (browser)
 ```
 
-Note: if you have a dev setup where `dsh-plugin/node_modules` is a
-symlink to the harness checkout, and `pnpm build` aborts with “Aborted
-removal of modules directory due to no TTY”, invoke the builders
-directly:
-
-```sh
-./node_modules/.bin/tsdown && ./node_modules/.bin/tsdown --config tsdown.client.config.ts
-```
+This installs dependencies with `pnpm install` as needed, then runs
+`pnpm build`; if the latter aborts (e.g. in a dev setup where
+`dsh-plugin/node_modules` is a symlink to the harness checkout), it
+falls back to invoking `tsdown` directly.
 
 #### Install the DeepSeek Harness plugin
 
@@ -81,7 +75,7 @@ Alternatively, copy `dsh-bridge.el` into your Emacs load-path and do
 
 Alternatively, the project can be bundled into a single Emacs package
 that also stores the DSH plugin.  This requires both `dsh` and `pnpm`
-to installed on `$PATH`.  First, build the package tarball from this
+installed on `$PATH`.  First, build the package tarball from this
 repository's root directory:
 
 ```sh

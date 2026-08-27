@@ -7,7 +7,9 @@
 # `M-x dsh-bridge-install-plugin' to install the plugin into DSH.
 #
 # The package version's single source of truth is the Version header of
-# emacs/dsh-bridge.el (the plugin's package.json version is unused).
+# emacs/dsh-bridge.el.  It is stamped into the staged plugin manifest so
+# the installed payload identifies itself and version bumps force pnpm to
+# refresh the copied plugin on re-install.
 
 VERSION := $(shell sed -n 's/^;; Version: //p' emacs/dsh-bridge.el | head -1)
 
@@ -22,8 +24,18 @@ all: package
 
 build: dsh-plugin/lib/index.js dsh-plugin/lib/client.js
 
-dsh-plugin/lib/index.js dsh-plugin/lib/client.js: $(PLUGIN_SRC) dsh-plugin/tsdown.config.ts dsh-plugin/tsdown.client.config.ts
-	cd dsh-plugin && pnpm build
+dsh-plugin/node_modules:
+	cd dsh-plugin && pnpm install
+
+# pnpm refuses to run scripts against a node_modules it does not
+# recognize (e.g. a symlink to the harness checkout) without a TTY;
+# fall back to invoking the builders directly.  node_modules is an
+# order-only prerequisite so its mtime alone never forces a rebuild.
+dsh-plugin/lib/index.js dsh-plugin/lib/client.js: $(PLUGIN_SRC) dsh-plugin/tsdown.config.ts dsh-plugin/tsdown.client.config.ts | dsh-plugin/node_modules
+	cd dsh-plugin && { pnpm build || { \
+	  echo "pnpm build failed; invoking tsdown directly"; \
+	  ./node_modules/.bin/tsdown && ./node_modules/.bin/tsdown --config tsdown.client.config.ts; \
+	}; }
 
 package: $(TAR)
 
@@ -32,6 +44,7 @@ $(TAR): build emacs/dsh-bridge.el dsh-plugin/package.json dsh-plugin/cordis.patc
 	mkdir -p $(STAGE)/dsh-plugin/lib
 	cp emacs/dsh-bridge.el $(STAGE)/
 	cp dsh-plugin/package.json dsh-plugin/cordis.patch.yml $(STAGE)/dsh-plugin/
+	sed -i 's/"version": "[^"]*"/"version": "$(VERSION)"/' $(STAGE)/dsh-plugin/package.json
 	cp dsh-plugin/lib/index.js dsh-plugin/lib/client.js $(STAGE)/dsh-plugin/lib/
 	printf '%s\n' \
 	  '(define-package "dsh-bridge" "$(VERSION)"' \
