@@ -200,12 +200,23 @@ DSH-View buffer (or run `M-x dsh-bridge-receive`) to pull the latest
 message pushed by DSH.  Receiving selects the DSH-View buffer unless
 `dsh-bridge-receive-pop` is nil.
 
-## Authentication
+## Permissions, authentication, and failure bounds
+
+The DSH plugin registers its routes on the DSH web server's loopback
+listener, and the browser plugin calls only same-origin
+`/dsh-bridge/*` routes.  No third-party service is contacted.
 
 Every `/dsh-bridge` route requires a shared bearer token stored at
-`~/.dsh/dsh-bridge-token` and generated on first use.  Emacs reads
-this file directly, while the browser plugin fetches it from the
+`~/.dsh/dsh-bridge-token`, generated on first use in mode 0600.  Emacs
+reads this file directly, while the browser plugin fetches it from the
 loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
+
+HTTP request bodies are capped at 1 MiB; larger bodies get a 413
+error.  DSH-to-Emacs messages are held in a bounded outbox (100
+unacknowledged entries); overflow evicts the oldest entries and is
+reported to the collector.  Requests naming a non-live session fail
+with 404/409; a draft push fails with 409 when no browser client is
+subscribed.
 
 ## License
 
