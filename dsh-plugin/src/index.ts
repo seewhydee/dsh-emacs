@@ -23,6 +23,8 @@
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
+//   GET  /dsh-bridge/prompts?sessionId=           -> user prompts, newest first
+//   GET  /dsh-bridge/replies?sessionId=           -> assistant replies, newest first
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
 //   POST /dsh-bridge/outbox { text, sessionId, source? } -> deposit an entry
@@ -40,6 +42,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
 import { Outbox } from './outbox.ts'
 import {
+  assistantReplies,
   draftMessage,
   isLoopbackAddress,
   isSubagentChild,
@@ -533,6 +536,26 @@ export function apply(ctx: Context): void {
         sendJson(res, 200, {
           sessionId: String(target.session.id),
           prompts: userPrompts(target.agent.session.deriveMessages()).reverse(),
+        })
+        return
+      }
+
+      // The output buffer's reply navigation: the session's assistant
+      // replies, newest first (the mirror of /prompts).
+      if (req.method === 'GET' && pathname === '/dsh-bridge/replies') {
+        const result = resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+        if (result.kind === 'error') {
+          sendJson(res, result.status, { error: result.message })
+          return
+        }
+        const target = targetById(result.id)
+        if (target === undefined) {
+          sendJson(res, 404, { error: 'no active session' })
+          return
+        }
+        sendJson(res, 200, {
+          sessionId: String(target.session.id),
+          replies: assistantReplies(target.agent.session.deriveMessages()).reverse(),
         })
         return
       }

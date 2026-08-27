@@ -67,6 +67,27 @@ export function userPrompts(messages: readonly MessageLike[]): string[] {
 }
 
 /**
+ * The text of every assistant reply, oldest first. The mirror image of
+ * `userPrompts`, and the reply-side counterpart to `latestAssistantText`:
+ * keeps `assistant` role messages and joins their text blocks with no
+ * separator — exactly how `latestAssistantText` renders a reply — so the
+ * newest entry matches what `GET /output` shows. Used by the output buffer's
+ * reply navigation (M-p/M-n).
+ */
+export function assistantReplies(messages: readonly MessageLike[]): string[] {
+  const replies: string[] = []
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue
+    const text = message.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text ?? '')
+      .join('')
+    if (text.trim() !== '') replies.push(text)
+  }
+  return replies
+}
+
+/**
  * Minimal structural face of one logged event, enough to fold a title and
  * last-activity time. `data` is deliberately `unknown`: the real `SessionEvent`
  * union satisfies this shape, and the title fold narrows the payload it reads.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  assistantReplies,
   draftMessage,
   hostnameOf,
   isLoopbackAddress,
@@ -97,6 +98,30 @@ describe('userPrompts', () => {
 
   it('returns an empty list with no messages', () => {
     expect(userPrompts([])).toEqual([])
+  })
+})
+
+describe('assistantReplies', () => {
+  it('returns assistant text in order, skipping other roles and text-less turns', () => {
+    const messages = [
+      message('user', [{ type: 'text', text: 'hi' }]),
+      message('assistant', [{ type: 'text', text: 'first' }]),
+      message('assistant', [{ type: 'tool-call' }]),
+      message('assistant', [{ type: 'text', text: 'second' }]),
+    ]
+    expect(assistantReplies(messages)).toEqual(['first', 'second'])
+  })
+
+  it('joins multiple text blocks with no separator, matching the output buffer', () => {
+    const messages = [
+      message('assistant', [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }]),
+    ]
+    expect(assistantReplies(messages)).toEqual(['ab'])
+  })
+
+  it('drops whitespace-only replies and returns an empty list with no messages', () => {
+    expect(assistantReplies([message('assistant', [{ type: 'text', text: '   ' }])])).toEqual([])
+    expect(assistantReplies([])).toEqual([])
   })
 })
 

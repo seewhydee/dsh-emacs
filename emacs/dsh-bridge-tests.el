@@ -655,8 +655,8 @@ binds the compose keys plus fetch/set-session/list."
 ;;; The view buffers
 
 (ert-deftest dsh-bridge-view-mode-basics ()
-  "The view mode is read-only and binds g/q/r/w/l — and no compose/fetch/
-targeting verbs."
+  "The view mode is read-only and binds g/q/r/w/i/l plus M-p/M-n — and no
+compose/fetch/targeting verbs."
   (with-temp-buffer
     (dsh-bridge-view-mode)
     (should buffer-read-only)
@@ -666,8 +666,14 @@ targeting verbs."
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "r")) #'dsh-bridge-reply))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "w"))
               #'dsh-bridge-copy-reply))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "i"))
+              #'dsh-bridge-receive))
   (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "l"))
               #'dsh-bridge-list-sessions))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "M-p"))
+              #'dsh-bridge-view-previous-reply))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "M-n"))
+              #'dsh-bridge-view-next-reply))
   (dolist (key '("s" "d" "f" "t" "u"))
     (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd key))
                     (cadr (assoc key dsh-bridge--verb-suffixes))))))
@@ -787,9 +793,23 @@ every collected id."
       (dsh-bridge-receive))
     (should (string-match-p "2 messages received, showing the latest" msg))))
 
-(ert-deftest dsh-bridge-receive-does-not-pop ()
-  "Receive fills the output buffer without selecting it."
+(ert-deftest dsh-bridge-receive-pops-by-default ()
+  "With `dsh-bridge-receive-pop' (the default), receive selects the output
+buffer."
   (let ((popped nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
+      (dsh-bridge-receive))
+    (should popped)))
+
+(ert-deftest dsh-bridge-receive-does-not-pop-when-disabled ()
+  "With `dsh-bridge-receive-pop' nil, receive fills the output buffer without
+selecting it."
+  (let ((popped nil)
+        (dsh-bridge-receive-pop nil))
     (cl-letf (((symbol-function 'dsh-bridge--request)
                (lambda (method _path _payload)
                  (cond ((equal method "GET") dsh-bridge-test--receive-response)
@@ -819,6 +839,82 @@ every collected id."
       (dsh-bridge-receive))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess2/")))))
+
+;;; Reply navigation (M-p / M-n in the output buffer)
+
+(defconst dsh-bridge-test--replies-response
+  (cons 200
+        (list (cons 'sessionId "s1")
+              (cons 'replies (list "newest" "middle" "oldest")))))
+
+(ert-deftest dsh-bridge-view-reply-navigation ()
+  "M-p/M-n cycle the output buffer through the session's replies and restore
+the anchor at the newest."
+  (let ((dsh-bridge--replies-cache nil))
+    (with-temp-buffer
+      (insert "newest")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (method path _payload)
+                   (should (equal method "GET"))
+                   (should (equal path "/replies?sessionId=s1"))
+                   dsh-bridge-test--replies-response)))
+        ;; First M-p: anchor the shown reply, move one older.
+        (dsh-bridge-view-previous-reply)
+        (should (equal (buffer-string) "middle"))
+        (should (equal dsh-bridge--view-replies-anchor "newest"))
+        (should (equal dsh-bridge--view-replies-index 1))
+        (should (string-match-p " · 2/3" (format "%s" header-line-format)))
+        ;; Older, then at the oldest it stays.
+        (dsh-bridge-view-previous-reply)
+        (should (equal (buffer-string) "oldest"))
+        (should (equal dsh-bridge--view-replies-index 2))
+        (dsh-bridge-view-previous-reply)
+        (should (equal (buffer-string) "oldest"))
+        ;; M-n walks back toward the newest, then restores the anchor.
+        (dsh-bridge-view-next-reply)
+        (should (equal (buffer-string) "middle"))
+        (dsh-bridge-view-next-reply)
+        (should (equal (buffer-string) "newest"))
+        (should (equal dsh-bridge--view-replies-index 0))
+        (dsh-bridge-view-next-reply)
+        (should (equal (buffer-string) "newest"))
+        (should (null dsh-bridge--view-replies-index))))))
+
+(ert-deftest dsh-bridge-view-reply-navigation-no-replies ()
+  "With no replies, M-p reports it and leaves the buffer alone."
+  (let ((dsh-bridge--replies-cache nil)
+        (msg nil))
+    (with-temp-buffer
+      (insert "content")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (_method _path _payload)
+                   (cons 200 (list (cons 'sessionId "s1") (cons 'replies nil)))))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-view-previous-reply))
+      (should (equal (buffer-string) "content"))
+      (should (string-match-p "no replies" msg)))))
+
+(ert-deftest dsh-bridge-fetch-resets-reply-navigation ()
+  "Fetching a fresh reply resets reply navigation to the anchor state."
+  (let ((dsh-bridge-default-session "s1"))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path _payload callback)
+                 (funcall callback nil
+                          "{\"text\":\"fresh\",\"sessionId\":\"s1\"}" 200))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-replies-index 2)
+        (setq-local dsh-bridge--view-replies-anchor "old anchor"))
+      (dsh-bridge-fetch)
+      (with-current-buffer "*dsh-bridge-output*"
+        (should (equal (buffer-string) "fresh"))
+        (should (null dsh-bridge--view-replies-index))
+        (should (null dsh-bridge--view-replies-anchor))))))
 
 ;;; The sessions list
 
