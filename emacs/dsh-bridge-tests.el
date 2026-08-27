@@ -947,13 +947,18 @@ untouched."
   (let ((dsh-bridge--sessions-cache '(((id . "live-1") (live . t) (cwd . "/w"))))
         (dsh-bridge-default-session "default")
         (bound nil) (popped nil))
-    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () "live-1"))
-              ((symbol-function 'dsh-bridge--set-prompt-session)
+    ;; `tabulated-list-get-id' is a defsubst: byte-compilation inlines it,
+    ;; so cl-letf cannot mock it.  Stand point on a real tabulated-list-id
+    ;; text property instead.
+    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
                (lambda (id) (setq bound id)))
               ((symbol-function 'dsh-bridge--prompt-buffer)
                (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
-      (dsh-bridge-open-session))
+      (with-temp-buffer
+        (insert (propertize "live-1 row" 'tabulated-list-id "live-1"))
+        (goto-char (point-min))
+        (dsh-bridge-open-session)))
     (should (equal bound "live-1"))
     (should (equal dsh-bridge-default-session "default"))
     (should popped)))
@@ -962,12 +967,14 @@ untouched."
   "RET on a saved row reports the consistent not-live message."
   (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
         (bound nil) (msg nil))
-    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () "saved-1"))
-              ((symbol-function 'dsh-bridge--set-prompt-session)
+    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
                (lambda (id) (setq bound id)))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge-open-session))
+      (with-temp-buffer
+        (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1"))
+        (goto-char (point-min))
+        (dsh-bridge-open-session)))
     (should (null bound))
     (should (string-match-p "not live" msg))))
 
@@ -975,10 +982,12 @@ untouched."
   "`t' sets the default target to the row's session."
   (let ((dsh-bridge--sessions-cache '(((id . "live-1") (live . t))))
         (dsh-bridge-default-session nil))
-    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () "live-1"))
-              ((symbol-function 'dsh-bridge-set-default-target)
+    (cl-letf (((symbol-function 'dsh-bridge-set-default-target)
                (lambda (id) (setq dsh-bridge-default-session id))))
-      (dsh-bridge-set-default-target-at-point))
+      (with-temp-buffer
+        (insert (propertize "live-1 row" 'tabulated-list-id "live-1"))
+        (goto-char (point-min))
+        (dsh-bridge-set-default-target-at-point)))
     (should (equal dsh-bridge-default-session "live-1"))))
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()

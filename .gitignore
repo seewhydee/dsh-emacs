@@ -13,5 +13,9 @@ pnpm-lock.yaml
 *~
 *.elc
 
+# Package tar staging and output (`make package`).
+/.package/
+/dsh-bridge-*.tar
+
 # Working plan files (not part of the committed repo).
 phase-*.md

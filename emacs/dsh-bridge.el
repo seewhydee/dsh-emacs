@@ -28,6 +28,9 @@
 ;; there without copy-paste.
 
 ;; Must be used with the `dsh-emacs-bridge' plugin installed in DSH.
+;; When this package was installed from the package tar, the plugin is
+;; bundled with it: run `M-x dsh-bridge-install-plugin' to install the
+;; plugin into the DSH profile, then restart "dsh web".
 
 ;; The interactive entry points are:
 ;;
@@ -64,6 +67,11 @@
 
 (defcustom dsh-bridge-url "http://127.0.0.1:3080/dsh-bridge"
   "Base URL of the `dsh-emacs-bridge' HTTP route."
+  :type 'string
+  :group 'dsh-bridge)
+
+(defcustom dsh-bridge-profile "web"
+  "DSH profile that `dsh-bridge-install-plugin' installs the plugin into."
   :type 'string
   :group 'dsh-bridge)
 
@@ -173,6 +181,49 @@ request.")
   "Session display mode for `*dsh-bridge-sessions*'.
 One of `live-saved' (default), `live', or `all'; initialized from
 `dsh-bridge-sessions-display' when the buffer is created and cycled by `v'.")
+
+;;; Plugin installation
+
+(defun dsh-bridge--plugin-directory ()
+  "Return the directory holding the bundled `dsh-emacs-bridge' plugin, or nil.
+The directory must contain the plugin manifest and the built `lib/'
+artifacts.  Two layouts are recognized: the packaged one (a `dsh-plugin'
+subdirectory next to this file, as in the package tar) and the source
+tree one (a `dsh-plugin' directory next to the `emacs/' directory)."
+  (let ((here (file-name-directory (locate-library "dsh-bridge"))))
+    (seq-find (lambda (dir)
+                (and (file-exists-p (expand-file-name "package.json" dir))
+                     (file-exists-p (expand-file-name "lib/index.js" dir))
+                     dir))
+              (list (expand-file-name "dsh-plugin" here)
+                    (expand-file-name "../dsh-plugin" here)))))
+
+;;;###autoload
+(defun dsh-bridge-install-plugin ()
+  "Install the bundled `dsh-emacs-bridge' plugin into the DSH profile.
+Runs \"dsh plugin --profile PROFILE add file:DIR\", where PROFILE is
+`dsh-bridge-profile' and DIR is the plugin directory bundled with this
+package.  The `file:' spec makes pnpm copy the plugin into the profile,
+so the installation survives upgrades of this Emacs package; re-run this
+command after each upgrade to refresh the installed copy.
+
+Requires `dsh' and `pnpm' on PATH (the plugin manager shells out to
+pnpm).  Restart \"dsh web\" afterwards for the plugin to load."
+  (interactive)
+  (let ((dir (dsh-bridge--plugin-directory)))
+    (unless dir
+      (user-error "No bundled dsh-emacs-bridge plugin found next to dsh-bridge.el; install from the source tree instead (see the README)"))
+    (unless (executable-find "dsh")
+      (user-error "The `dsh' executable was not found on PATH"))
+    (let ((buffer (get-buffer-create "*dsh-bridge-install*")))
+      (if (zerop (call-process "dsh" nil buffer nil
+                               "plugin" "--profile" dsh-bridge-profile
+                               "add" (concat "file:" dir)))
+          (message "Installed dsh-emacs-bridge into the `%s' profile; restart \"dsh %s\" to load it"
+                   dsh-bridge-profile dsh-bridge-profile)
+        (display-buffer buffer)
+        (user-error "dsh plugin install failed; see the %s buffer"
+                    (buffer-name buffer))))))
 
 ;;; Low-level HTTP plumbing
 
