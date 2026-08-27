@@ -94,6 +94,17 @@ From Emacs:
 - `M-x dsh-bridge` — open the dispatcher.  Its header shows the *effective
   session* of the buffer it was invoked from, and its letter keys map to the
   verbs below (grouped into Compose / Read / Sessions).
+- `M-x dsh-bridge-list-sessions` — browse DSH sessions in a
+  `*dsh-bridge-sessions*` buffer; shows a default-target
+  marker column (`*` for the default target), a running-marker column
+  (`…` while a session's model is working), the session name, its age, and
+  its workspace.  All non-archived sessions (live and saved) are listed by
+  default; `v` cycles the display mode (`live+saved` → `live` →
+  `live+saved+archived`).  `RET`/`r` open the session under point (binds the
+  prompt buffer to it; the default target is untouched), `t` sets the default
+  target (live only), `u` clears it, `f` peeks the session's latest reply
+  without changing anything, `w` copies the session id, `D` shows session
+  details, `g` re-fetches and `S` sorts.
 - `M-x dsh-bridge-send` — send the region, or the whole buffer (confirmed
   first), to DSH as a prompt.
 - `M-x dsh-bridge-draft` — same region-or-buffer, pushed into the DSH
@@ -117,17 +128,6 @@ From Emacs:
   the button on assistant messages in the web UI) into `*dsh-bridge-output*`,
   without popping the buffer.  This is the manual fallback for the
   notifications-off case; the SSE listener calls it automatically otherwise.
-- `M-x dsh-bridge-list-sessions` — browse DSH sessions in a
-  `*dsh-bridge-sessions*` buffer, sorted by age; shows a default-target
-  marker column (`*` for the default target), a running-marker column
-  (`…` while a session's model is working), the session name, its age, and
-  its workspace.  All non-archived sessions (live and saved) are listed by
-  default; `v` cycles the display mode (`live+saved` → `live` →
-  `live+saved+archived`).  `RET`/`r` open the session under point (binds the
-  prompt buffer to it; the default target is untouched), `t` sets the default
-  target (live only), `u` clears it, `f` peeks the session's latest reply
-  without changing anything, `w` copies the session id, `D` shows session
-  details, `g` re-fetches and `S` sorts.
 - `M-x dsh-bridge-set-default-target` — set the bridge-wide default target
   (live sessions only; choose `(last-active)` to clear it).  Setting the
   default target is Emacs-local: there is no host-side pin anymore.
