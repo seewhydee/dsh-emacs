@@ -73,30 +73,23 @@ replacing the path with the actual path to `dsh-bridge.el`.
 Alternatively, copy `dsh-bridge.el` into your Emacs load-path and do
 `(require 'dsh-bridge)`.
 
-### Alternative: install as an Emacs package tar
+### Alternative: Emacs package
 
 Instead of the manual steps above, everything can be installed as a
-single Emacs package.  Build the package tar from this repository's
-root directory (this runs the same plugin build, so it needs Node.js
-and pnpm):
+single Emacs package.  First, build the package tar from this
+repository's root directory:
 
 ```sh
-make package     # emits dsh-bridge-<version>.tar
+make package
 ```
 
 Then, in Emacs:
 
 1. `M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET`
-2. `M-x dsh-bridge-install-plugin` — installs the bundled plugin into
-   the `web` DSH profile (customize `dsh-bridge-profile` to use a
-   different profile).  This runs `dsh plugin --profile web add
-   file:<bundled-dir>`, so `dsh` and `pnpm` must be on PATH.
+2. `M-x dsh-bridge-install-plugin` — install bundled plugin into DSH
+   (customize `dsh-bridge-profile` to use a non-default profile).
+   This requires `dsh` and `pnpm` to both be on PATH.
 3. Restart `dsh web`.
-
-The plugin is copied into the DSH profile (pnpm `file:` semantics), so
-it keeps working when the Emacs package is upgraded and the old package
-directory is deleted; run `M-x dsh-bridge-install-plugin` again after
-each upgrade to install the new plugin build.
 
 ## Usage
 
