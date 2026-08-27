@@ -1049,19 +1049,18 @@ plain."
 ;;; Dispatcher and menus
 
 (ert-deftest dsh-bridge-dispatcher-suffixes ()
-  "Every verb is a dispatcher suffix; the inbox (`i') and the `S' mnemonic
-are gone, and targeting lives on `t'/`u'."
+  "Every verb is a dispatcher suffix; reply/open is `r' (not `p'), the inbox
+(`i') and the `S' mnemonic are gone, and targeting lives on `t'/`u'."
   (dolist (spec dsh-bridge--verb-suffixes)
     (should (transient-get-suffix 'dsh-bridge (car spec))))
+  (should (transient-get-suffix 'dsh-bridge "r"))
   (should (transient-get-suffix 'dsh-bridge "t"))
   (should (transient-get-suffix 'dsh-bridge "u"))
   ;; `transient-get-suffix' signals when the key is absent.
-  (should-not (condition-case nil
-                  (progn (transient-get-suffix 'dsh-bridge "i") t)
-                (error nil)))
-  (should-not (condition-case nil
-                  (progn (transient-get-suffix 'dsh-bridge "S") t)
-                (error nil))))
+  (dolist (absent '("p" "i" "S"))
+    (should-not (condition-case nil
+                    (progn (transient-get-suffix 'dsh-bridge absent) t)
+                  (error nil)))))
 
 (ert-deftest dsh-bridge-mode-menus ()
   "Each dsh-bridge mode installs a menu-bar menu."

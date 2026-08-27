@@ -38,12 +38,12 @@
 ;; Targeting (UX plan, Section 3): every verb acts on the *effective session*
 ;; of the buffer it runs in — the buffer's own session (the prompt buffer's
 ;; binding, the output buffer's shown reply) if it has one, else the default
-;; target, else the host's last-active session.  "Opening" a session (`RET'/
-;; `r' in the list, `r' in the output buffer) binds the prompt buffer to that
-;; session and never changes the default target; the default target is set
-;; explicitly (`t' set / `u' clear, in the list and the dispatcher).  A prefix
-;; argument to send/draft/fetch makes a one-shot session choice for that call
-;; only.
+;; target, else the host's last-active session.  "Opening" a session (`r' in
+;; the dispatcher and the output buffer, `RET'/`r' in the list) binds the
+;; prompt buffer to that session and never changes the default target; the
+;; default target is set explicitly (`t' set / `u' clear, in the list and the
+;; dispatcher).  A prefix argument to send/draft/fetch makes a one-shot
+;; session choice for that call only.
 ;;
 ;; DSH→Emacs text (UX plan 2): the outbox is invisible transport.  `fetch'
 ;; pulls the latest assistant reply of a session; "Send to Emacs" from the web
@@ -896,8 +896,8 @@ these letters; this table serves the dispatcher's layout alone.")
   (defconst dsh-bridge--dispatcher-layout
     (vconcat (list :description '(lambda () (dsh-bridge--dispatcher-header)))
              (vconcat (list "Compose"
-                            '("p" dsh-bridge-prompt-for-effective
-                              :description "edit prompt buffer")
+                            '("r" dsh-bridge-prompt-for-effective
+                              :description "reply/open prompt buffer")
                             (dsh-bridge--layout-verb "s")
                             (dsh-bridge--layout-verb "d")))
              (vconcat (list "Read"
@@ -908,10 +908,11 @@ these letters; this table serves the dispatcher's layout alone.")
                             (dsh-bridge--layout-verb "l")))
              (vconcat (list '("q" transient-quit-one :description "quit"))))
     "Layout of the `dsh-bridge' dispatcher, grouped by purpose.
-The verbs come from `dsh-bridge--verb-suffixes'; `p' (prompt buffer) and `q'
-(quit) are dispatcher-only.  `t' set / `u' clear the default target; `S' is
-not a dispatcher key — in the sessions list it keeps its tabulated-list sort
-meaning (UX plan 2, Section 2.4)."))
+The verbs come from `dsh-bridge--verb-suffixes'; `r' (reply/open the prompt
+buffer — the same key the buffers use) and `q' (quit) are dispatcher-only.
+`t' set / `u' clear the default target; `S' is not a dispatcher key — in the
+sessions list it keeps its tabulated-list sort meaning (UX plan 2, Section
+2.4)."))
 
 ;;; The output buffer (*dsh-bridge-output*)
 
@@ -1194,10 +1195,10 @@ session's reply, closing the compose→read loop."
 
 (defun dsh-bridge-prompt-for-effective ()
   "Open the prompt buffer bound to the effective session of the current buffer.
-Used by the dispatcher's `p' so that opening a prompt from a managed buffer
-continues that buffer's session's conversation (UX plan, Section 4.1).  When
-nothing is bound and there is no default target, the prompt is opened
-unbound (it follows last-active)."
+Used by the dispatcher's `r' (the same reply/open key the buffers use) so
+that opening a prompt from a managed buffer continues that buffer's session's
+conversation (UX plan, Section 4.1).  When nothing is bound and there is no
+default target, the prompt is opened unbound (it follows last-active)."
   (interactive)
   (let ((effective (dsh-bridge--effective-session)))
     (when effective
@@ -1496,8 +1497,8 @@ the row's session (live only), `u' clears the default target, `f' peeks the
 session's latest reply without changing anything, `v' cycles the display mode
 (live+saved, live, all), `w' copies the session id under point, `D' describes
 the session, `g' re-fetches the list, `S' sorts by column (inherited).
-`p' is previous-line (the tabulated-list convention; it is not a bridge
-command here — the dispatcher's `p' opens the prompt buffer)."
+`p' is previous-line (the tabulated-list convention; no bridge command uses
+bare `p' — reply/open is `r' everywhere, `RET' here as well)."
   (setq-local dsh-bridge--sessions-display dsh-bridge-sessions-display))
 
 (define-key dsh-bridge-sessions-mode-map (kbd "RET")
@@ -1699,8 +1700,9 @@ mode, `w' copies the session id, `D' shows session details, `g' re-fetches,
   "Dispatch DSH bridge actions.
 The header shows the effective session of the buffer the dispatcher was
 invoked from; the verbs act on it.  `s' sends the region or buffer as a
-prompt, `d' sends it as a draft, `p' opens the prompt buffer, `f' fetches the
-latest reply, `t' sets the default target, `u' clears it, `l' lists sessions."
+prompt, `d' sends it as a draft, `r' opens the prompt buffer for the
+effective session, `f' fetches the latest reply, `t' sets the default target,
+`u' clears it, `l' lists sessions."
   dsh-bridge--dispatcher-layout)
 
 ;;; Menu bar (under Tools)

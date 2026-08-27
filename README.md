@@ -1,36 +1,29 @@
 # dsh-emacs-bridge
 
-A two-way bridge between [Emacs](https://www.gnu.org/software/emacs/)
+This is a two-way bridge between [Emacs](https://www.gnu.org/software/emacs/)
 and a [Deepseek Harness](https://github.com/deepseek-ai/deepseek-harness) 
-session.  The bridge moves text from Emacs to DeepSeek Harness, and
-vice versa, over loopback HTTP.  This lets you type in Emacs and read
-DSH's replies without copy-pasting, while also avoiding streaming
+session.  The bridge moves text from Emacs to DeepSeek Harness (DSH),
+and vice versa, over loopback HTTP.  This lets you type in Emacs and
+read DSH's replies without copy-pasting, while also avoiding streaming
 voluminous LLM outputs through Emacs.
 
-Currently in working protoype stage.
+It consists of two components:
 
-## Components
+- `dsh-plugin/` — a DeepSeek Harness plugin (`dsh-emacs-bridge`).
+- `emacs/dsh-bridge.el` — an Emacs package to interact with the harness.
 
-- `dsh-plugin/` — `dsh-emacs-bridge`, a dual-face DeepSeek Harness plugin
-  consisting of:
-  - a host bundle (Cordis id `dsh-bridge`) that registers the loopback HTTP
-    routes under `/dsh-bridge/`;
-  - a `dsh.client` browser plugin that adds the "Send to Emacs" button
-    to assistant messages and applies composer drafts.
-- `emacs/dsh-bridge.el` — an Emacs package supplying commands to
-  interact with DeepSeek Harness via the HTTP route.
+## Installation
 
-## Requirements
+### Requirements
 
-- A running `dsh` (the `web` profile).
+- A running `dsh` (currently the `web` profile is supported).
 - Node.js and `pnpm` to build the plugin.
 - Emacs 29 or later.
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
 
-## Build the plugin
+### Build the plugin
 
-The plugin ships as ESM JavaScript built by
-[tsdown](https://tsdown.dev/):
+From this repository's root directory:
 
 ```sh
 cd dsh-plugin
@@ -38,21 +31,19 @@ pnpm install   # first time only
 pnpm build     # emits lib/index.js (host) + lib/client.js (browser)
 ```
 
-Note: with a dev setup where `dsh-plugin/node_modules` is a symlink to
-the harness checkout, `pnpm build` may abort with “Aborted removal of
-modules directory due to no TTY”.  In that case, invoke the builders
+Note: if you have a dev setup where `dsh-plugin/node_modules` is a
+symlink to the harness checkout, and `pnpm build` aborts with “Aborted
+removal of modules directory due to no TTY”, invoke the builders
 directly:
 
 ```sh
 ./node_modules/.bin/tsdown && ./node_modules/.bin/tsdown --config tsdown.client.config.ts
 ```
 
-## Install the DeepSeek Harness plugin
+### Install the DeepSeek Harness plugin
 
-The plugin is a dsh bundle.  How you install it depends on how your
-DeepSeek Harness is installed.
-
-If you have a global install putting a `dsh` binary on PATH:
+How you install the plugin depends on how DSH was installed.  If you
+have a global install with `dsh` on PATH:
 
 ```sh
 # global install, from this repo root:
@@ -60,18 +51,17 @@ dsh plugin --profile web add link:./dsh-plugin
 dsh web
 ```
 
-If you have a source checkout of DeepSeek Harness and run it as a pnpm
-script (`pnpm dsh web`):
+If you have a source checkout of DSH and run it as a pnpm script
+(`pnpm dsh web`), do the following (replace the `link:` path below
+with the appropriate path into this repo):
 
 ```sh
-# source checkout, from the harness directory (absolute path):
+# source checkout, from deepseek-harness root:
 pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs-bridge/dsh-plugin
 pnpm dsh web
 ```
 
-The `link:` path above should be the directory you invoke `dsh` from.
-
-## Install the Emacs package
+### Install the Emacs package
 
 Put this in your Emacs init file (`~/.emacs.d/init.el` or `~/.emacs`),
 replacing the path with the actual path to `dsh-bridge.el`.
@@ -80,79 +70,104 @@ replacing the path with the actual path to `dsh-bridge.el`.
 (load "/path/to/dsh-emacs-bridge/emacs/dsh-bridge.el")
 ```
 
-## Authentication
-
-Every `/dsh-bridge` route requires a shared bearer token stored at
-`~/.dsh/dsh-bridge-token` and generated on first use.  Emacs reads
-this file directly, while the browser plugin fetches it from the
-loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
+Alternatively, copy `dsh-bridge.el` into your Emacs load-path and do
+`(require 'dsh-bridge)`.
 
 ## Usage
 
-From Emacs:
+From Emacs, the main entry-points are these two commands:
 
-- `M-x dsh-bridge` — open the dispatcher.  Its header shows the *effective
-  session* of the buffer it was invoked from, and its letter keys map to the
-  verbs below (grouped into Compose / Read / Sessions).
-- `M-x dsh-bridge-list-sessions` — browse DSH sessions in a
-  `*dsh-bridge-sessions*` buffer; shows a default-target
-  marker column (`*` for the default target), a running-marker column
-  (`…` while a session's model is working), the session name, its age, and
-  its workspace.  All non-archived sessions (live and saved) are listed by
-  default; `v` cycles the display mode (`live+saved` → `live` →
-  `live+saved+archived`).  `RET`/`r` open the session under point (binds the
-  prompt buffer to it; the default target is untouched), `t` sets the default
-  target (live only), `u` clears it, `f` peeks the session's latest reply
-  without changing anything, `w` copies the session id, `D` shows session
-  details, `g` re-fetches and `S` sorts.
-- `M-x dsh-bridge-send` — send the region, or the whole buffer (confirmed
-  first), to DSH as a prompt.
-- `M-x dsh-bridge-draft` — same region-or-buffer, pushed into the DSH
-  composer as a *draft*: the text lands in the composer's text box for review
-  but is not submitted (`send` submits immediately).  Requires the DSH web UI
-  to be open in a browser with the target session loaded; the draft goes to
-  the bridge's effective session, and a 409 is reported when no browser
-  client is connected at all.
-- `M-x dsh-bridge-prompt` — pop to the persistent prompt-editing buffer, the
-  compose half of the loop; `C-c C-c` sends, `C-c C-d` drafts, `C-c C-k`
-  erases, `C-c C-f` fetches the session's latest reply (closing the loop),
-  `C-c C-s` rebinds this buffer's session, `C-c C-l` lists sessions, and the
-  text survives sends for edit-and-resubmit.  `M-p`/`M-n` walk the session's
-  prompt history, recalling earlier prompts (the current draft is restored by
-  `M-n` at the newest prompt).  The buffer's `default-directory` follows its
-  effective session's workspace.
-- `M-x dsh-bridge-fetch` — fetch the latest DSH assistant reply into
-  `*dsh-bridge-output*`.  The buffer's `default-directory` is set to the
-  workspace of the session the reply came from.
-- `M-x dsh-bridge-receive` — receive the latest "Send to Emacs" message (from
-  the button on assistant messages in the web UI) into `*dsh-bridge-output*`,
-  without popping the buffer.  This is the manual fallback for the
-  notifications-off case; the SSE listener calls it automatically otherwise.
-- `M-x dsh-bridge-set-default-target` — set the bridge-wide default target
-  (live sessions only; choose `(last-active)` to clear it).  Setting the
-  default target is Emacs-local: there is no host-side pin anymore.
+- `M-x dsh-bridge` — open a transient menu for DSH commands.
+- `M-x dsh-bridge-list-sessions` — show a list of DSH sessions.
 
-### Targeting: the effective session
+Consider giving the dispatcher a global keybinding, e.g.,
 
-Every verb acts on the **effective session** of the buffer it runs in:
+```elisp
+(keymap-global-set "C-c d" #'dsh-bridge)
+```
 
-1. the buffer's own session, if it has one — the prompt buffer's binding, or
-   the reply shown in the output buffer;
-2. else the bridge-wide **default target** (`dsh-bridge-default-session`);
-3. else the host's **last-active** session.
+### Transient menu
 
-So **opening a session is not the same as setting the default target**:
-`RET`/`r` in the session list (or `r` in the output buffer) binds the *prompt
-buffer* to that session — its header shows `session: <name>` — without
-changing what context-free sends from other buffers use.  To make a session
-the target of context-free operations, set the default target explicitly
-(`t` in the list, `t` in the dispatcher, or `M-x
-dsh-bridge-set-default-target`); headers then show `<name> (default)`.
-When nothing is bound, headers show the resolved last-active session with
-`(last-active)`.
+The `M-x dsh-bridge` command opens a transient menu that prompts for
+the next command.  The top line shows the session your next command
+will act on: the buffer's own session when the dispatcher is invoked
+from a DSH-View or DSH-Prompt buffer, otherwise the **default target**
+session if one is set, otherwise the **last-active** session.
 
-A prefix argument to `send`/`draft`/`fetch` chooses a session for that call
-only, overriding everything above.
+The following commands are available from the transient menu:
+
+* `q` — exit the transient menu.
+* `r` — open a DSH-Prompt buffer for the session.
+* `s` — send the region, or the whole buffer, as a prompt.
+* `d` — send the region, or the whole buffer as a *draft*; you can
+        still edit it in the DSH composer before submitting.
+* `f` — fetch the session's latest reply into the DSH-View buffer.
+* `t` — set the default target session.
+* `u` — clear the default target session.
+* `l` — open the DSH-Sessions buffer.
+
+### Sessions menu
+
+The `M-x dsh-bridge-list-sessions` command opens a DSH-Sessions
+buffer, named `*dsh-bridge-sessions*`, listing DSH's sessions.  The
+default target session (if any) is marked by a `*` in the leftmost
+column.
+
+The following commands are available from the DSH-Sessions buffer:
+
+* `q` — quit the window and bury the buffer.
+* `f` — fetch the last output for the session at point into a DSH-View buffer.
+* `r` or `RET` — open a DSH-Prompt buffer for the session at point.
+* `t` — set the session at point as the default target.
+* `u` — clear the default target.
+* `v` — cycle session display between `live+saved` (default), `live`, and
+        `live+saved+archived`.
+* `g` — refresh the DSH-Sessions buffer.
+
+For a full list, refer to the menu bar.  Other `tabulated-list-mode`
+keys are also available.
+
+### DSH-View buffer
+
+This read-only buffer contains the model output for a DSH session.  It
+is fetched by `f` from the transient menu or the DSH-Sessions buffer,
+`C-c C-f` from the DSH-Prompt buffer, or pushed from the web UI's
+"Send to Emacs" button (see below).  The session is displayed on the
+header line.
+
+The following commands are available:
+
+* `g` — re-fetch the shown session's latest reply.
+* `r` — open a DSH-Prompt buffer bound to the shown session (the
+  default target is not changed).
+* `w` — copy the reply (region, else the whole buffer) to the kill ring.
+* `l` — open the DSH-Sessions buffer.
+* `q` — quit the window and bury the buffer.
+
+If markdown-mode is installed, and `dsh-bridge-view-gfm` is non-nil,
+the reply is font-locked as GitHub-Flavored Markdown.
+
+### DSH-Prompt buffer
+
+This buffer is used to compose a prompt, or reply, for a DSH session.
+It is opened by `r`/`RET` from the DSH-Sessions buffer, and `r` from
+the transient menu or DSH-View buffer.
+
+The session for the prompt applies to determined by how it was
+invoked; e.g., `r` from a DSH-View buffer opens a prompt for the same
+session.
+
+The following commands are available from the DSH-Prompt buffer:
+
+* `C-c C-c` — send the region, or the whole buffer, as a prompt.
+* `C-c C-d` — push it to the DSH composer as a draft instead.
+* `C-c C-k` — erase the buffer.
+* `C-c C-f` — open the DSH-View buffer for this session.
+* `C-c C-l` — open the DSH-Sessions buffer.
+* `M-p` / `M-n` — walk the session's prompt history.
+
+When `markdown-mode` is installed, this buffer derives from it, so
+most markdown editing commands are also available.
 
 ### DSH→Emacs text: fetch and receive
 
@@ -164,22 +179,6 @@ session, however it arrived — a `fetch` (pull, the latest reply) or a
 time).  There is no inbox: the delivery queue is invisible plumbing, and
 `r`/`w` in the output buffer act on the shown session's text either way.
 
-### The buffers at a glance
-
-| Buffer / mode | Keys |
-|---|---|
-| Dispatcher (`M-x dsh-bridge`) | `p` prompt · `s` send · `d` draft · `f` fetch · `t` set default target · `u` clear · `l` list sessions · `q` quit |
-| `*dsh-bridge-sessions*` | `RET`/`r` open session · `t` set default target · `u` clear · `f` peek · `v` display mode · `w` copy id · `D` details · `g` refresh · `S` sort · `n`/`p` line motion |
-| `*dsh-bridge-output*` | `g` re-fetch the shown reply · `r` reply (bind prompt to the shown session) · `w` copy · `l` list sessions · `q` dismiss |
-| `*dsh-bridge-prompt*` | `C-c C-c` send · `C-c C-d` draft · `C-c C-k` erase · `C-c C-f` fetch · `C-c C-s` set buffer session · `C-c C-l` list · `M-p`/`M-n` history |
-
-The output buffer is read-only and its keymap is identical with and without
-`markdown-mode`; when markdown-mode is installed (and `dsh-bridge-view-gfm`
-is non-nil), replies are additionally font-locked as GitHub-Flavored Markdown
-(including native highlighting of fenced code blocks).  `g` is the output
-buffer's fetch: `f` elsewhere produces a reply into this buffer, so inside it
-the two coincide.
-
 With `dsh-bridge-notifications` non-nil (the default), Emacs subscribes to the
 bridge's event stream (starting lazily on first use) and automatically fills
 `*dsh-bridge-output*` with new "Send to Emacs" messages as they arrive —
@@ -187,25 +186,16 @@ without popping the buffer, so an unsolicited push never steals focus.
 `dsh-bridge-notifications-start` / `dsh-bridge-notifications-stop` control the
 listener.
 
-### Renames (0.1 → 0.2, breaking)
+The corresponding commands are `M-x dsh-bridge-fetch` (pull the latest
+reply) and `M-x dsh-bridge-receive` (pull the latest "Send to Emacs"
+message — the manual fallback when notifications are off).
 
-The pin and inbox vocabularies are gone; commands and variables are renamed
-outright (no obsolete aliases), so update any init-file bindings:
+## Authentication
 
-| Old | New |
-|---|---|
-| `dsh-bridge-target-session` | `dsh-bridge-default-session` |
-| `dsh-bridge-select-session` | `dsh-bridge-set-default-target` |
-| `dsh-bridge-unpin-session` | `dsh-bridge-clear-default-target` |
-| `dsh-bridge-select-session-at-point` | `dsh-bridge-open-session` (semantics changed: binds the prompt buffer, no retarget) |
-| `dsh-bridge-current-session` | removed (the dispatcher header shows the target) |
-| `dsh-bridge-inbox` | `dsh-bridge-receive` (no `*dsh-bridge-inbox*` buffer; pushes land in `*dsh-bridge-output*`) |
-
-You may wish to give the dispatcher to a global keybinding, e.g.
-
-```elisp
-(keymap-global-set "C-c d" #'dsh-bridge)
-```
+Every `/dsh-bridge` route requires a shared bearer token stored at
+`~/.dsh/dsh-bridge-token` and generated on first use.  Emacs reads
+this file directly, while the browser plugin fetches it from the
+loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
 
 ## License
 
