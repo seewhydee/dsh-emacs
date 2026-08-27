@@ -16,7 +16,7 @@ It consists of two components:
 
 ### Requirements
 
-- A running `dsh` (currently the `web` profile is supported).
+- `dsh`, the DeepSeek Harness.
 - Node.js and `pnpm` to build the plugin.
 - Emacs 29 or later.
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
@@ -35,8 +35,7 @@ make package
 Then, in Emacs, run:
 
 1. `M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET`
-2. `M-x dsh-bridge-install-plugin` — install bundled plugin into DSH
-   (customize `dsh-bridge-profile` to use a non-default profile).
+2. `M-x dsh-bridge-install-plugin` — install bundled plugin into DSH.
 3. Restart `dsh web`.
 
 ### Manual compilation and installation
@@ -65,8 +64,7 @@ directly:
 
 #### Install the DeepSeek Harness plugin
 
-How you install the plugin depends on how DSH was installed.  If you
-have a global install with `dsh` on PATH:
+If you have a global install with `dsh` on `$PATH`:
 
 ```sh
 # global install, from this repo root:
@@ -75,7 +73,7 @@ dsh web
 ```
 
 If you have a source checkout of DSH and run it as a pnpm script
-(`pnpm dsh web`), do the following (replace the `link:` path below
+(`pnpm dsh web`), do the following instead (replace the `link:` path
 with the appropriate path into this repo):
 
 ```sh
