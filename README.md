@@ -80,7 +80,7 @@ From Emacs, the main entry-points are these two commands:
 - `M-x dsh-bridge` — open a transient menu for DSH commands.
 - `M-x dsh-bridge-list-sessions` — show a list of DSH sessions.
 
-Consider giving the dispatcher a global keybinding, e.g.,
+Consider giving either of these a global keybinding, e.g.,
 
 ```elisp
 (keymap-global-set "C-c d" #'dsh-bridge)
