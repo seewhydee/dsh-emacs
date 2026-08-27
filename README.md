@@ -132,18 +132,15 @@ This read-only buffer contains the model output for a DSH session.  It
 is fetched by `f` from the transient menu or the DSH-Sessions buffer,
 `C-c C-f` from the DSH-Prompt buffer, or pushed from the web UI's
 "Send to Emacs" button (see below).  The session is displayed on the
-header line (`reply from:` for a fetch, `received from:` for a push).
+header line.
 
 The following commands are available:
 
-* `g` — re-fetch the shown session's latest reply.
-* `r` — open a DSH-Prompt buffer bound to the shown session (the
-  default target is not changed).
+* `g` — re-fetch the current session's latest reply.
+* `r` — open a DSH-Prompt buffer for the current session.
 * `w` — copy the reply (region, else the whole buffer) to the kill ring.
-* `i` — receive the latest "Send to Emacs" message (same as `M-x
-  dsh-bridge-receive`).
-* `M-p` / `M-n` — cycle the shown session's assistant replies (older /
-  newer); the header shows the position `k/n`.
+* `i` — receive the latest "Send to Emacs" message (see below).
+* `M-p`/`M-n` — cycle the current session's assistant replies.
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
 
@@ -154,11 +151,9 @@ the reply is font-locked as GitHub-Flavored Markdown.
 
 This buffer is used to compose a prompt, or reply, for a DSH session.
 It is opened by `r`/`RET` from the DSH-Sessions buffer, and `r` from
-the transient menu or DSH-View buffer.
-
-The session to which the prompt applies is determined by how this
-buffer was invoked; e.g., `r` from a DSH-View buffer opens a prompt
-for the same session.
+the transient menu or DSH-View buffer.  The session affected is
+determined by how this buffer was invoked; for instance, `r` from a
+DSH-View buffer opens a prompt for the same session.
 
 The following commands are available from the DSH-Prompt buffer:
 
@@ -172,18 +167,17 @@ The following commands are available from the DSH-Prompt buffer:
 When `markdown-mode` is installed, this buffer derives from it, so
 most markdown editing commands are also available.
 
-### DSH→Emacs text: fetch and receive
+### Sending text from DSH to Emacs
 
 The DSH plugin adds a "Send to Emacs" button that lets you push
 specific assistant messages to Emacs.
 
 With `dsh-bridge-notifications` non-nil (the default), Emacs
-subscribes to the bridge's event stream (starting lazily on first use)
-and automatically updates the DSH-View buffer.  If you disable this
-option, you can use `i` in the DSH-View buffer (or run `M-x
-dsh-bridge-receive`) to pull the latest message pushed by DSH.
-Receiving selects the DSH-View buffer unless `dsh-bridge-receive-pop`
-is nil.
+subscribes to the bridge's event stream and automatically updates the
+DSH-View buffer.  If you disable this option, you can use `i` in the
+DSH-View buffer (or run `M-x dsh-bridge-receive`) to pull the latest
+message pushed by DSH.  Receiving selects the DSH-View buffer unless
+`dsh-bridge-receive-pop` is nil.
 
 ## Authentication
 
@@ -194,4 +188,5 @@ loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
 
 ## License
 
-GPLv3 or later.  See [COPYING](COPYING).
+This software is released under the terms of the GNU General Public
+License version 3, or later.  See [COPYING](COPYING).
