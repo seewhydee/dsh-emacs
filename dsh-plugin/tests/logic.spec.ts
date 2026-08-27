@@ -9,6 +9,7 @@ import {
   latestAssistantText,
   mergeSessionRows,
   outboxMessage,
+  outboxSessionId,
   parseBearerAuthorization,
   resolveTargetId,
   sessionTitle,
@@ -210,37 +211,32 @@ describe('resolveTargetId', () => {
   const live = [liveSession('a', { createdAt: 10, eventTimes: [40] }), liveSession('b', { createdAt: 20, eventTimes: [50] })]
 
   it('honors an explicit id', () => {
-    const result = resolveTargetId('a', undefined, live, () => true)
+    const result = resolveTargetId('a', live, () => true)
     expect(result).toEqual({ kind: 'target', id: 'a' })
   })
 
   it('rejects an explicit id that is not live with 404', () => {
-    const result = resolveTargetId('nope', undefined, live, () => true)
+    const result = resolveTargetId('nope', live, () => true)
     expect(result).toEqual({ kind: 'error', status: 404, message: 'session nope is not live' })
   })
 
   it('rejects a live id with no agent with 409', () => {
-    const result = resolveTargetId('a', undefined, live, id => id !== 'a')
+    const result = resolveTargetId('a', live, id => id !== 'a')
     expect(result).toEqual({ kind: 'error', status: 409, message: 'session a has no live agent' })
   })
 
-  it('honors the selected id when present', () => {
-    const result = resolveTargetId(undefined, 'b', live, () => true)
+  it('picks the most recently active session with no explicit id', () => {
+    const result = resolveTargetId(undefined, live, () => true)
     expect(result).toEqual({ kind: 'target', id: 'b' })
   })
 
-  it('falls back to last-active when the selected id is dead', () => {
-    const result = resolveTargetId(undefined, 'gone', live, () => true)
-    expect(result).toEqual({ kind: 'target', id: 'b' })
-  })
-
-  it('picks the most recently active session when nothing is pinned', () => {
-    const result = resolveTargetId(undefined, undefined, live, () => true)
-    expect(result).toEqual({ kind: 'target', id: 'b' })
+  it('skips sessions without a live agent when picking last-active', () => {
+    const result = resolveTargetId(undefined, live, id => id !== 'b')
+    expect(result).toEqual({ kind: 'target', id: 'a' })
   })
 
   it('reports no active session with 409 when nothing is targetable', () => {
-    const result = resolveTargetId(undefined, undefined, [], () => true)
+    const result = resolveTargetId(undefined, [], () => true)
     expect(result).toEqual({ kind: 'error', status: 409, message: 'no active session' })
   })
 })
@@ -260,6 +256,19 @@ describe('parseBearerAuthorization', () => {
 
   it('returns undefined for an empty token', () => {
     expect(parseBearerAuthorization('Bearer ')).toBeUndefined()
+  })
+})
+
+describe('outboxSessionId', () => {
+  it('accepts a non-empty string session id', () => {
+    expect(outboxSessionId({ sessionId: 's1' })).toBe('s1')
+  })
+
+  it('rejects missing, non-string, and empty session ids', () => {
+    expect(outboxSessionId(undefined)).toBeNull()
+    expect(outboxSessionId({})).toBeNull()
+    expect(outboxSessionId({ sessionId: 42 })).toBeNull()
+    expect(outboxSessionId({ sessionId: '' })).toBeNull()
   })
 })
 

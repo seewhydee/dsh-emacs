@@ -91,62 +91,115 @@ loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
 
 From Emacs:
 
-- `M-x dsh-bridge` — open the dispatcher.  Its header shows the
-  current target session and its letter keys map to the verbs below.
+- `M-x dsh-bridge` — open the dispatcher.  Its header shows the *effective
+  session* of the buffer it was invoked from, and its letter keys map to the
+  verbs below (grouped into Compose / Read / Sessions).
 - `M-x dsh-bridge-send` — send the region, or the whole buffer (confirmed
   first), to DSH as a prompt.
 - `M-x dsh-bridge-draft` — same region-or-buffer, pushed into the DSH
   composer as a *draft*: the text lands in the composer's text box for review
   but is not submitted (`send` submits immediately).  Requires the DSH web UI
   to be open in a browser with the target session loaded; the draft goes to
-  the bridge's target session (selected or last-active), and a 409 is
-  reported when no browser client is connected at all.
+  the bridge's effective session, and a 409 is reported when no browser
+  client is connected at all.
 - `M-x dsh-bridge-prompt` — pop to the persistent prompt-editing buffer, the
   compose half of the loop; `C-c C-c` sends, `C-c C-d` drafts, `C-c C-k`
-  erases, and the text survives sends for edit-and-resubmit.  `M-p`/`M-n`
-  walk the target session's prompt history, recalling earlier prompts (the
-  current draft is restored by `M-n` at the newest prompt).  The buffer's
-  `default-directory` follows the target session's workspace.
+  erases, `C-c C-f` fetches the session's latest reply (closing the loop),
+  `C-c C-s` rebinds this buffer's session, `C-c C-l` lists sessions, and the
+  text survives sends for edit-and-resubmit.  `M-p`/`M-n` walk the session's
+  prompt history, recalling earlier prompts (the current draft is restored by
+  `M-n` at the newest prompt).  The buffer's `default-directory` follows its
+  effective session's workspace.
 - `M-x dsh-bridge-fetch` — fetch the latest DSH assistant reply into
   `*dsh-bridge-output*`.  The buffer's `default-directory` is set to the
   workspace of the session the reply came from.
-- `M-x dsh-bridge-inbox` — pull messages sent from DSH (e.g. via the
-  "Send to Emacs" button on assistant messages in the web UI) into
-  `*dsh-bridge-inbox*`.
+- `M-x dsh-bridge-receive` — receive the latest "Send to Emacs" message (from
+  the button on assistant messages in the web UI) into `*dsh-bridge-output*`,
+  without popping the buffer.  This is the manual fallback for the
+  notifications-off case; the SSE listener calls it automatically otherwise.
 - `M-x dsh-bridge-list-sessions` — browse DSH sessions in a
-  `*dsh-bridge-sessions*` buffer, sorted by age; shows a pin-marker column
-  (`*` for the pinned session), a running-marker column (`…` while a session's
-  model is working), the session name, its age, and its workspace.
-  All non-archived sessions (live and saved) are listed by default; `v` cycles
-  the display mode (`live+saved` → `live` → `live+saved+archived`).
-  `RET` pins the session under point (live only), `u` unpins, `p` pins and
-  opens the prompt buffer, `f` peeks the session's latest reply without
-  changing the pin, `w` copies the session id, `D` shows session details.
-- `M-x dsh-bridge-select-session` — choose the target session (live sessions
-  only; choose `(last-active)` to unpin).
+  `*dsh-bridge-sessions*` buffer, sorted by age; shows a default-target
+  marker column (`*` for the default target), a running-marker column
+  (`…` while a session's model is working), the session name, its age, and
+  its workspace.  All non-archived sessions (live and saved) are listed by
+  default; `v` cycles the display mode (`live+saved` → `live` →
+  `live+saved+archived`).  `RET`/`r` open the session under point (binds the
+  prompt buffer to it; the default target is untouched), `t` sets the default
+  target (live only), `u` clears it, `f` peeks the session's latest reply
+  without changing anything, `w` copies the session id, `D` shows session
+  details, `g` re-fetches and `S` sorts.
+- `M-x dsh-bridge-set-default-target` — set the bridge-wide default target
+  (live sessions only; choose `(last-active)` to clear it).  Setting the
+  default target is Emacs-local: there is no host-side pin anymore.
 
-Sends and output fetches go to the selected session, or to the most recently
-active session when none is selected.  A prefix argument to `send`/`draft`/
-`fetch` chooses the target session for that call only, without changing the
-pin.  The `*dsh-bridge-output*` and `*dsh-bridge-inbox*` buffers are
-read-only and bind the dispatcher's letters (`s`/`d`/`f`/`i`/`S`/`l`) plus
-`r` to reply (pin the shown session and open the prompt buffer below), `g` to
-refresh and `q` to dismiss.  When `markdown-mode` is installed (and
-`dsh-bridge-view-gfm` is non-nil), these buffers are derived from
-`gfm-view-mode`, so assistant replies are font-locked as GitHub-Flavored
-Markdown (including native highlighting of fenced code blocks); otherwise
-they fall back to `special-mode`.
+### Targeting: the effective session
+
+Every verb acts on the **effective session** of the buffer it runs in:
+
+1. the buffer's own session, if it has one — the prompt buffer's binding, or
+   the reply shown in the output buffer;
+2. else the bridge-wide **default target** (`dsh-bridge-default-session`);
+3. else the host's **last-active** session.
+
+So **opening a session is not the same as setting the default target**:
+`RET`/`r` in the session list (or `r` in the output buffer) binds the *prompt
+buffer* to that session — its header shows `session: <name>` — without
+changing what context-free sends from other buffers use.  To make a session
+the target of context-free operations, set the default target explicitly
+(`t` in the list, `t` in the dispatcher, or `M-x
+dsh-bridge-set-default-target`); headers then show `<name> (default)`.
+When nothing is bound, headers show the resolved last-active session with
+`(last-active)`.
+
+A prefix argument to `send`/`draft`/`fetch` chooses a session for that call
+only, overriding everything above.
+
+### DSH→Emacs text: fetch and receive
+
+`*dsh-bridge-output*` holds the assistant text Emacs currently has for a
+session, however it arrived — a `fetch` (pull, the latest reply) or a
+"Send to Emacs" push from the web UI (a specific message).  The header says
+`reply from: <session> · refreshed <time>` for a fetch and
+`received from: <session> · sent <time>` for a push (the message's own send
+time).  There is no inbox: the delivery queue is invisible plumbing, and
+`r`/`w` in the output buffer act on the shown session's text either way.
+
+### The buffers at a glance
+
+| Buffer / mode | Keys |
+|---|---|
+| Dispatcher (`M-x dsh-bridge`) | `p` prompt · `s` send · `d` draft · `f` fetch · `t` set default target · `u` clear · `l` list sessions · `q` quit |
+| `*dsh-bridge-sessions*` | `RET`/`r` open session · `t` set default target · `u` clear · `f` peek · `v` display mode · `w` copy id · `D` details · `g` refresh · `S` sort · `n`/`p` line motion |
+| `*dsh-bridge-output*` | `g` re-fetch the shown reply · `r` reply (bind prompt to the shown session) · `w` copy · `l` list sessions · `q` dismiss |
+| `*dsh-bridge-prompt*` | `C-c C-c` send · `C-c C-d` draft · `C-c C-k` erase · `C-c C-f` fetch · `C-c C-s` set buffer session · `C-c C-l` list · `M-p`/`M-n` history |
+
+The output buffer is read-only and its keymap is identical with and without
+`markdown-mode`; when markdown-mode is installed (and `dsh-bridge-view-gfm`
+is non-nil), replies are additionally font-locked as GitHub-Flavored Markdown
+(including native highlighting of fenced code blocks).  `g` is the output
+buffer's fetch: `f` elsewhere produces a reply into this buffer, so inside it
+the two coincide.
 
 With `dsh-bridge-notifications` non-nil (the default), Emacs subscribes to the
-bridge's event stream (starting lazily on first use) and automatically pulls
-new "Send to Emacs" messages into `*dsh-bridge-inbox*` as they arrive, so no
-manual inbox pull is needed.  `dsh-bridge-notifications-start` /
-`dsh-bridge-notifications-stop` control the listener.
+bridge's event stream (starting lazily on first use) and automatically fills
+`*dsh-bridge-output*` with new "Send to Emacs" messages as they arrive —
+without popping the buffer, so an unsolicited push never steals focus.
+`dsh-bridge-notifications-start` / `dsh-bridge-notifications-stop` control the
+listener.
 
-The pre-interface command names (`dsh-bridge-send-region`,
-`dsh-bridge-send-buffer`, `dsh-bridge-send-draft-region`,
-`dsh-bridge-send-draft-buffer`, `dsh-bridge-get-output`,
-`dsh-bridge-pull-inbox`) remain as obsolete aliases of the verbs above.
+### Renames (0.1 → 0.2, breaking)
+
+The pin and inbox vocabularies are gone; commands and variables are renamed
+outright (no obsolete aliases), so update any init-file bindings:
+
+| Old | New |
+|---|---|
+| `dsh-bridge-target-session` | `dsh-bridge-default-session` |
+| `dsh-bridge-select-session` | `dsh-bridge-set-default-target` |
+| `dsh-bridge-unpin-session` | `dsh-bridge-clear-default-target` |
+| `dsh-bridge-select-session-at-point` | `dsh-bridge-open-session` (semantics changed: binds the prompt buffer, no retarget) |
+| `dsh-bridge-current-session` | removed (the dispatcher header shows the target) |
+| `dsh-bridge-inbox` | `dsh-bridge-receive` (no `*dsh-bridge-inbox*` buffer; pushes land in `*dsh-bridge-output*`) |
 
 You may wish to give the dispatcher to a global keybinding, e.g.
 

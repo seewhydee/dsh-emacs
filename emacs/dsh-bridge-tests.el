@@ -27,6 +27,8 @@
 (require 'cl-lib)
 (require 'dsh-bridge)
 
+;;; Low-level HTTP plumbing
+
 (ert-deftest dsh-bridge-path-no-session ()
   (should (equal (dsh-bridge--path "/output" nil) "/output")))
 
@@ -73,80 +75,181 @@
 (ert-deftest dsh-bridge-error-message-success ()
   (should (equal (dsh-bridge--error-message nil 200 '((ok . t))) nil)))
 
-(ert-deftest dsh-bridge-target-label ()
-  (let ((dsh-bridge-target-session nil))
-    (should (equal (dsh-bridge--target-label) "last-active")))
-  (let ((dsh-bridge-target-session "s1"))
-    (should (equal (dsh-bridge--target-label) "s1"))))
+;;; Targeting: the effective-session rule and the default target
 
-;; The remaining tests point the bridge at port 9 (discard), which refuses
-;; connections immediately, so a transport failure stands in for an
-;; unreachable `dsh web'.
+(ert-deftest dsh-bridge-effective-session-default-only ()
+  "With no buffer session, the effective session is the default target."
+  (let ((dsh-bridge-default-session "s1"))
+    (with-temp-buffer
+      (should (equal (dsh-bridge--effective-session) "s1")))))
 
-(ert-deftest dsh-bridge-select-session-transport-failure ()
-  "A failed /select request must not look like a successful selection."
-  (let ((dsh-bridge-url "http://127.0.0.1:9/dsh-bridge")
-        (dsh-bridge-timeout 2)
-        (dsh-bridge-target-session nil))
-    (dsh-bridge-select-session "some-session")
-    (should (null dsh-bridge-target-session))))
+(ert-deftest dsh-bridge-effective-session-nil-without-default ()
+  "With no buffer session and no default target, the effective session is nil
+(last-active)."
+  (let ((dsh-bridge-default-session nil))
+    (with-temp-buffer
+      (should (null (dsh-bridge--effective-session))))))
 
-(ert-deftest dsh-bridge-current-session-transport-failure ()
-  "A failed /current request must not clear the pinned session."
-  (let ((dsh-bridge-url "http://127.0.0.1:9/dsh-bridge")
-        (dsh-bridge-timeout 2)
-        (dsh-bridge-target-session "pinned-session"))
-    (dsh-bridge-current-session)
-    (should (equal dsh-bridge-target-session "pinned-session"))))
+(ert-deftest dsh-bridge-effective-session-prompt-binding-wins ()
+  "A prompt-buffer binding beats the default target."
+  (let ((dsh-bridge-default-session "default"))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "bound")
+      (should (equal (dsh-bridge--effective-session) "bound")))))
 
-(ert-deftest dsh-bridge-select-session-offers-live-sessions-only ()
-  "Completion offers live sessions (plus the unpin choice) only."
-  (let ((dsh-bridge-url "http://127.0.0.1:9/dsh-bridge")
-        (dsh-bridge-timeout 2)
-        (choices-seen nil))
+(ert-deftest dsh-bridge-effective-session-output-content-wins ()
+  "The output buffer's shown session beats the default target."
+  (let ((dsh-bridge-default-session "default"))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "shown")
+      (should (equal (dsh-bridge--effective-session) "shown")))))
+
+(ert-deftest dsh-bridge-set-default-target-local ()
+  "`dsh-bridge-set-default-target' sets the Emacs-side default directly and
+never POSTs /select (the host pin is gone)."
+  (let ((dsh-bridge-default-session "old") (posts nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method path _payload)
+                 (when (equal method "POST") (push path posts))
+                 (cons 200 (list (cons 'sessions nil))))))
+      (dsh-bridge-set-default-target "new"))
+    (should (equal dsh-bridge-default-session "new"))
+    (should-not (member "/select" posts))))
+
+(ert-deftest dsh-bridge-clear-default-target-local ()
+  "`dsh-bridge-clear-default-target' clears the default target, no host
+round-trip."
+  (let ((dsh-bridge-default-session "pinned"))
+    (dsh-bridge-clear-default-target))
+  (should (null dsh-bridge-default-session)))
+
+(ert-deftest dsh-bridge-set-default-target-offers-live-sessions-only ()
+  "Completion offers live sessions (plus the last-active choice) only."
+  (let ((table-seen nil)
+        (dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  '(((id . "live-1") (live . t) (cwd . "/a"))
                    ((id . "saved-1") (live . nil) (cwd . "/b")))))
               ((symbol-function 'completing-read)
                (lambda (_prompt table &rest _rest)
-                 (setq choices-seen table)
+                 (setq table-seen table)
                  "(last-active)")))
-      (call-interactively #'dsh-bridge-select-session))
-    (should (equal choices-seen '(("a" . "live-1") ("(last-active)" . nil))))))
+      (call-interactively #'dsh-bridge-set-default-target))
+    (should (equal (all-completions "" table-seen)
+                   '("a" "(last-active)")))))
 
-(defconst dsh-bridge-test--outbox-response
-  (cons 200
-        (list (cons 'entries
-                    (list (list (cons 'id "e1")
-                                (cons 'sessionId "s1")
-                                (cons 'source "message-action")
-                                (cons 'text "hello")
-                                (cons 'ts 1000))))
-              (cons 'overflowed nil))))
+(ert-deftest dsh-bridge-target-label ()
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--sessions-cache nil))
+    (should (equal (dsh-bridge--target-label) "last-active")))
+  (let ((dsh-bridge-default-session "s1")
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
+    (should (equal (dsh-bridge--target-label) "T"))))
 
-(ert-deftest dsh-bridge-inbox-inserts-and-acks ()
-  "Pull inserts each entry and acks the collected ids after a successful insert."
-  (let (acked-payload)
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method path payload)
-                 (cond
-                  ((equal method "GET") dsh-bridge-test--outbox-response)
-                  ((equal method "POST") (setq acked-payload payload)
-                   (cons 200 (list (cons 'ok t))))
-                  (t (cons 404 (list (cons 'error "unexpected"))))))))
-      (dsh-bridge-inbox)
-      (should (string-match-p "hello"
-                              (with-current-buffer "*dsh-bridge-inbox*"
-                                (buffer-string))))
-      (should (equal acked-payload '((ids . ("e1")))))
-      (should (with-current-buffer "*dsh-bridge-inbox*"
-                (eq major-mode 'dsh-bridge-view-mode))))))
+(ert-deftest dsh-bridge-effective-session-label ()
+  "Header labels carry the right qualifier."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    ;; Bound buffer session: plain label.
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (should (equal (dsh-bridge--effective-session-label) "T")))
+    ;; Default target: (default) qualifier.
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session "s1"))
+        (should (equal (dsh-bridge--effective-session-label) "T (default)"))))
+    ;; Nothing bound: resolved last-active with (last-active) qualifier.
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session nil)
+            (dsh-bridge--last-resolved-active nil))
+        (should (equal (dsh-bridge--effective-session-label)
+                       "T (last-active)"))))))
+
+(ert-deftest dsh-bridge-resolved-active-label ()
+  "The advisory last-active label uses the last verb response, then the cache."
+  (let ((dsh-bridge--last-resolved-active '("s2" . "Second"))
+        (dsh-bridge--sessions-cache nil))
+    (should (equal (dsh-bridge--resolved-active-label) "Second")))
+  (let ((dsh-bridge--last-resolved-active nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (title . "T") (live . t))
+           ((id . "s2") (title . "Older") (live . t) (lastActive . 1)))))
+    ;; s1 has no activity timestamps -> 0; s2's lastActive wins.
+    (should (equal (dsh-bridge--resolved-active-label) "Older"))))
+
+(ert-deftest dsh-bridge-session-not-live-message ()
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
+    (should (string-match-p "session T is not live"
+                            (dsh-bridge--session-not-live-message "s1")))))
+
+(ert-deftest dsh-bridge-send-text-records-last-resolved ()
+  "A nil-target send records the host-resolved session for display."
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge--last-resolved-active nil))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path payload callback)
+                 (funcall callback nil
+                          "{\"ok\":true,\"sessionId\":\"s1\",\"title\":\"T\"}"
+                          200))))
+      (dsh-bridge-send-text "hello"))
+    (should (equal (car dsh-bridge--last-resolved-active) "s1"))
+    (should (equal (cdr dsh-bridge--last-resolved-active) "T"))))
+
+(ert-deftest dsh-bridge-explicit-target-does-not-record-last-resolved ()
+  "An explicit target is not the host's last-active resolution; nothing is
+recorded."
+  (let ((dsh-bridge-default-session "s1")
+        (dsh-bridge--last-resolved-active nil))
+    (cl-letf (((symbol-function 'dsh-bridge--call)
+               (lambda (_method _path payload callback)
+                 (funcall callback nil
+                          "{\"ok\":true,\"sessionId\":\"s1\",\"title\":\"T\"}"
+                          200))))
+      (dsh-bridge-send-text "hello"))
+    (should (null dsh-bridge--last-resolved-active))))
+
+;;; Session labels
+
+(ert-deftest dsh-bridge-session-label-precedence ()
+  "The label is the title, else the cwd basename, else the raw id."
+  (should (equal (dsh-bridge--session-label '((title . "T") (cwd . "/x") (id . "i")))
+                 "T"))
+  (should (equal (dsh-bridge--session-label '((cwd . "/x/y") (id . "i"))) "y"))
+  (should (equal (dsh-bridge--session-label '((cwd . "/x/") (id . "i"))) "x"))
+  (should (equal (dsh-bridge--session-label '((id . "i"))) "i"))
+  (should (equal (dsh-bridge--session-label '((title . "") (cwd . "/x") (id . "i")))
+                 "x")))
+
+(ert-deftest dsh-bridge-session-label-disambiguates-on-collision ()
+  "A basename label shared with another row gains a short-id qualifier; a
+unique label stays plain; a title is never disambiguated."
+  (let ((a '((id . "ab1234") (cwd . "/w/x")))
+        (b '((id . "cd5678") (cwd . "/w/x"))))
+    (should (equal (dsh-bridge--session-label a nil) "x"))
+    (should (equal (dsh-bridge--session-label a (list a b)) "x · ab1234"))
+    (should (equal (dsh-bridge--session-label b (list a b)) "x · cd5678"))
+    (should (equal (dsh-bridge--session-label '((id . "ef9012") (title . "T"))
+                                              (list a b))
+                   "T"))))
+
+(ert-deftest dsh-bridge-workspace-label ()
+  "The workspace label is the title, else the cwd basename, else the cwd."
+  (should (equal (dsh-bridge--workspace-label '((workspace . "proj") (cwd . "/x/y")))
+                 "proj"))
+  (should (equal (dsh-bridge--workspace-label '((cwd . "/x/y"))) "y"))
+  (should (equal (dsh-bridge--workspace-label '((cwd . "/x/"))) "x"))
+  (should (equal (dsh-bridge--workspace-label '((cwd . "/"))) "/"))
+  (should (equal (dsh-bridge--workspace-label '((id . "i"))) "")))
+
+;;; Text senders
 
 (ert-deftest dsh-bridge-send-draft-posts-to-draft ()
-  "send-draft POSTs the text (and the pinned session) to /draft."
+  "send-draft POSTs the text (and the effective session) to /draft."
   (let ((captured nil)
-        (dsh-bridge-target-session "s1"))
+        (dsh-bridge-default-session "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (method path payload _callback)
                  (setq captured (list method path payload)))))
@@ -156,10 +259,10 @@
     (should (equal (cdr (assoc 'text (caddr captured))) "hello"))
     (should (equal (cdr (assoc 'sessionId (caddr captured))) "s1"))))
 
-(ert-deftest dsh-bridge-send-draft-override-wins-over-pin ()
-  "An explicit session override beats the pin in the /draft payload."
+(ert-deftest dsh-bridge-send-draft-override-wins-over-default ()
+  "An explicit session override beats the default target in the /draft payload."
   (let ((captured nil)
-        (dsh-bridge-target-session "pin"))
+        (dsh-bridge-default-session "pin"))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (method path payload _callback)
                  (setq captured (list method path payload)))))
@@ -167,10 +270,10 @@
     (should (equal (cadr captured) "/draft"))
     (should (equal (cdr (assoc 'sessionId (caddr captured))) "override"))))
 
-(ert-deftest dsh-bridge-send-text-override-wins-over-pin ()
-  "An explicit session override beats the pin in the /send payload."
+(ert-deftest dsh-bridge-send-text-override-wins-over-default ()
+  "An explicit session override beats the default target in the /send payload."
   (let ((captured nil)
-        (dsh-bridge-target-session "pin"))
+        (dsh-bridge-default-session "pin"))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path payload _callback)
                  (setq captured payload))))
@@ -178,9 +281,9 @@
     (should (equal (cdr (assoc 'sessionId captured)) "override"))))
 
 (ert-deftest dsh-bridge-send-text-no-target-omits-session ()
-  "With neither a pin nor an override, no sessionId key is sent."
+  "With neither a default target nor an override, no sessionId key is sent."
   (let ((captured nil)
-        (dsh-bridge-target-session nil))
+        (dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path payload _callback)
                  (setq captured payload))))
@@ -245,13 +348,52 @@
     (should (null asked))
     (should (equal (cdr (assoc 'text captured)) "prompt text"))))
 
+(ert-deftest dsh-bridge-draft-whole-buffer-confirms ()
+  "A whole-buffer draft asks y-or-n-p first (guard symmetry with send)."
+  (let ((asked nil) captured)
+    (with-temp-buffer
+      (insert "whole")
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_method _path payload _callback)
+                   (setq captured payload)))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (setq asked t) t)))
+        (dsh-bridge-draft)))
+    (should asked)
+    (should (equal (cdr (assoc 'text captured)) "whole"))))
+
+(ert-deftest dsh-bridge-send-read-only-no-region-refuses ()
+  "Sending from a read-only buffer without a region refuses."
+  (let ((sent nil))
+    (with-temp-buffer
+      (insert "content")
+      (dsh-bridge-view-mode)
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (&rest _) (setq sent t))))
+        (condition-case nil (dsh-bridge-send) (error nil)))
+      (should (null sent)))))
+
+(ert-deftest dsh-bridge-send-active-region-in-read-only-works ()
+  "A region in a read-only buffer is sendable."
+  (let ((transient-mark-mode t) captured)
+    (with-temp-buffer
+      (insert "alpha beta")
+      (dsh-bridge-view-mode)
+      (goto-char 7)
+      (set-mark (point-max))
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_method _path payload _callback)
+                   (setq captured payload))))
+        (dsh-bridge-send)))
+    (should (equal (cdr (assoc 'text captured)) "beta"))))
+
 (ert-deftest dsh-bridge-send-prefix-override ()
   "With a prefix argument, send targets the completing-read session for this
-call only, leaving the pin untouched."
+call only, leaving the default target untouched."
   (let ((transient-mark-mode t)
         (current-prefix-arg t)
         (captured nil)
-        (dsh-bridge-target-session "pin"))
+        (dsh-bridge-default-session "pin"))
     (with-temp-buffer
       (insert "text")
       (goto-char (point-min))
@@ -266,11 +408,14 @@ call only, leaving the pin untouched."
         (call-interactively #'dsh-bridge-send)))
     (should (equal (cdr (assoc 'sessionId captured)) "live-1"))
     (should (equal (cdr (assoc 'text captured)) "text"))
-    (should (equal dsh-bridge-target-session "pin"))))
+    (should (equal dsh-bridge-default-session "pin"))))
 
-(ert-deftest dsh-bridge-fetch-uses-pin ()
-  "`dsh-bridge-fetch' requests /output with the pinned session id."
-  (let ((dsh-bridge-target-session "s1")
+;;; Fetch and the output buffer
+
+(ert-deftest dsh-bridge-fetch-uses-default-target ()
+  "`dsh-bridge-fetch' requests /output with the default target when the
+current buffer has no session of its own."
+  (let ((dsh-bridge-default-session "s1")
         (captured nil))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method path _payload _callback)
@@ -280,7 +425,7 @@ call only, leaving the pin untouched."
 
 (ert-deftest dsh-bridge-fetch-populates-output ()
   "Fetch writes the reply into *dsh-bridge-output* in `dsh-bridge-view-mode'."
-  (let ((dsh-bridge-target-session "s1"))
+  (let ((dsh-bridge-default-session "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path _payload callback)
                  (funcall callback nil
@@ -297,8 +442,8 @@ call only, leaving the pin untouched."
 
 (ert-deftest dsh-bridge-fetch-peek-labels-content-session ()
   "A peek/override fetch labels the output buffer with the content's session,
-not the pinned target."
-  (let ((dsh-bridge-target-session "s1"))
+not the default target."
+  (let ((dsh-bridge-default-session "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path _payload callback)
                  (funcall callback nil
@@ -309,8 +454,7 @@ not the pinned target."
       (should (equal (buffer-string) "other reply"))
       (should (string-match-p "reply from: s2"
                               (format "%s" header-line-format)))
-      (should-not (string-match-p "target: s1"
-                                  (format "%s" header-line-format))))))
+      (should-not (string-match-p "target:" (format "%s" header-line-format))))))
 
 (ert-deftest dsh-bridge-apply-session-directory ()
   "The helper sets default-directory (trailing slash), with cache fallback."
@@ -328,7 +472,7 @@ not the pinned target."
 
 (ert-deftest dsh-bridge-fetch-sets-output-directory ()
   "Fetch sets the output buffer's default-directory to the session cwd."
-  (let ((dsh-bridge-target-session "s1"))
+  (let ((dsh-bridge-default-session "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path _payload callback)
                  (funcall callback nil
@@ -338,102 +482,92 @@ not the pinned target."
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess1/")))))
 
-(ert-deftest dsh-bridge-send-text-sets-prompt-directory ()
-  "A successful send sets the prompt buffer's directory to the session cwd."
-  (let ((dsh-bridge-target-session "s1")
-        (buf (get-buffer-create "*dsh-bridge-prompt*")))
-    (with-current-buffer buf
-      (dsh-bridge-prompt-mode))
-    (cl-letf (((symbol-function 'dsh-bridge--call)
-               (lambda (_method _path _payload callback)
-                 (funcall callback nil
-                          "{\"ok\":true,\"sessionId\":\"s1\",\"cwd\":\"/w/sess1\",\"title\":\"T\"}"
-                          200))))
-      (dsh-bridge-send-text "hello"))
-    (with-current-buffer buf
-      (should (equal default-directory "/w/sess1/")))
-    (kill-buffer buf)))
+;;; The prompt buffer: session binding, header, history
 
-(ert-deftest dsh-bridge-select-session-sets-prompt-directory ()
-  "Selecting a session sets the prompt buffer's directory from the cache."
+(ert-deftest dsh-bridge-set-prompt-session-sets-directory ()
+  "Binding the prompt buffer sets its default-directory from the cache."
+  (when (get-buffer "*dsh-bridge-prompt*")
+    (kill-buffer "*dsh-bridge-prompt*"))
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/w/sess1") (live . t)))))
+    (dsh-bridge--set-prompt-session "s1")
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (should (equal default-directory "/w/sess1/"))))
+  (kill-buffer "*dsh-bridge-prompt*"))
+
+(ert-deftest dsh-bridge-set-default-target-sets-prompt-directory ()
+  "Setting the default target re-points an unbound prompt buffer's directory."
+  (when (get-buffer "*dsh-bridge-prompt*")
+    (kill-buffer "*dsh-bridge-prompt*"))
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/w/sess1") (live . t))))
-        (buf (get-buffer-create "*dsh-bridge-prompt*")))
-    (with-current-buffer buf
-      (dsh-bridge-prompt-mode))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (_method _path _payload)
-                 (cons 200 (list (cons 'ok t))))))
-      (dsh-bridge-select-session "s1"))
-    (with-current-buffer buf
-      (should (equal default-directory "/w/sess1/")))
-    (kill-buffer buf)))
-
-(ert-deftest dsh-bridge-view-mode-basics ()
-  "The view mode is read-only and binds the dispatcher's letters plus g/q/h."
-  (with-temp-buffer
-    (dsh-bridge-view-mode)
-    (should buffer-read-only)
-    (should (eq major-mode 'dsh-bridge-view-mode)))
-  (dolist (spec dsh-bridge--verb-suffixes)
-    (should (eq (lookup-key dsh-bridge-view-mode-map (kbd (car spec)))
-                (cadr spec))))
-  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "g")) #'revert-buffer))
-  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "q")) #'quit-window))
-  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "r")) #'dsh-bridge-reply)))
-
-(ert-deftest dsh-bridge-reply-pins-content-session ()
-  "Reply pins the session whose output is shown and opens the prompt below."
-  (with-temp-buffer
-    (dsh-bridge-view-mode)
-    (setq-local dsh-bridge--view-content-session "sess-a")
-    (let ((selected nil) (popped nil))
-      (cl-letf (((symbol-function 'dsh-bridge--session-live-p) (lambda (_) t))
-                ((symbol-function 'dsh-bridge-select-session)
-                 (lambda (id) (setq selected id)))
-                ((symbol-function 'dsh-bridge--prompt-buffer)
-                 (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
-                ((symbol-function 'pop-to-buffer)
-                 (lambda (buf action) (setq popped (list buf action)))))
-        (dsh-bridge-reply))
-      (should (equal selected "sess-a"))
-      (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
-      (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
-
-(ert-deftest dsh-bridge-view-mode-gfm ()
-  "When markdown-mode/gfm is loaded, the view mode inherits gfm-view-mode.
-No-op child of the markdown-less test environment; asserts the GitHub-Flavored
-Markdown wiring in a session where markdown-mode is available."
-  (when (featurep 'markdown-mode)
-    (with-temp-buffer
-      (insert "# Heading\n")
-      (dsh-bridge-view-mode)
-      (should (derived-mode-p 'gfm-view-mode))
-      (should font-lock-defaults)
-      (should markdown-fontify-code-blocks-natively)
-      (should buffer-read-only))))
+        (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil)))
+      (get-buffer-create "*dsh-bridge-prompt*")
+      (dsh-bridge-set-default-target "s1")
+      (with-current-buffer "*dsh-bridge-prompt*"
+        (should (equal default-directory "/w/sess1/")))))
+  (kill-buffer "*dsh-bridge-prompt*"))
 
 (ert-deftest dsh-bridge-prompt-mode-basics ()
   "The prompt mode derives from text-mode in a markdown-less environment and
-binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
+binds the compose keys plus fetch/set-session/list."
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
     (should (eq major-mode 'dsh-bridge-prompt-mode))
     (should (provided-mode-derived-p major-mode 'text-mode))
-    (should (string-match-p "target" (format "%s" header-line-format))))
+    (should (string-match-p "session" (format "%s" header-line-format))))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-c"))
               #'dsh-bridge-send))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-d"))
               #'dsh-bridge-draft))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-k"))
               #'dsh-bridge-erase-prompt))
+  (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-f"))
+              #'dsh-bridge-fetch))
+  (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-s"))
+              #'dsh-bridge-set-buffer-session))
+  (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-l"))
+              #'dsh-bridge-list-sessions))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "M-p"))
               #'dsh-bridge-prompt-previous-history))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "M-n"))
               #'dsh-bridge-prompt-next-history)))
 
+(ert-deftest dsh-bridge-prompt-header-qualifiers ()
+  "The prompt header names the effective session with its qualifier."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    ;; Bound buffer session: plain label (header refreshes after binding).
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (setq header-line-format (dsh-bridge--prompt-header-line))
+      (should (string-match-p "session: T$" (format "%s" header-line-format))))
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session "s1"))
+        (dsh-bridge-prompt-mode)
+        (should (string-match-p "session: T (default)"
+                                (format "%s" header-line-format)))))
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session nil)
+            (dsh-bridge--last-resolved-active nil))
+        (dsh-bridge-prompt-mode)
+        (should (string-match-p "(last-active)"
+                                (format "%s" header-line-format)))))))
+
+(ert-deftest dsh-bridge-set-buffer-session-binds ()
+  "`C-c C-s' rebinds the prompt buffer's session."
+  (let ((dsh-bridge-default-session "default"))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge--read-live-session-id)
+                 (lambda (_prompt _pseudo) "live-1"))
+                ((symbol-function 'dsh-bridge--set-prompt-session)
+                 (lambda (id) (setq-local dsh-bridge--prompt-session id))))
+        (dsh-bridge-set-buffer-session))
+      (should (equal dsh-bridge--prompt-session "live-1")))))
+
 (ert-deftest dsh-bridge-prompt-history-navigation ()
   "M-p/M-n cycle the prompt buffer through the cached session history."
-  (let ((dsh-bridge-target-session "s1"))
+  (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-history-session "s1")
@@ -461,8 +595,8 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
       (should (null dsh-bridge--prompt-history-index)))))
 
 (ert-deftest dsh-bridge-prompt-history-fetches ()
-  "M-p fetches the session's prompts from the host when not cached."
-  (let ((dsh-bridge-target-session "s1"))
+  "M-p fetches the effective session's prompts from the host when not cached."
+  (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (cl-letf (((symbol-function 'dsh-bridge--request)
@@ -478,7 +612,7 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
 
 (ert-deftest dsh-bridge-prompt-history-no-prompts ()
   "M-p with no cached prompts reports it and leaves the buffer untouched."
-  (let ((dsh-bridge-target-session "s1"))
+  (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-history-session "s1")
@@ -507,7 +641,7 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
 
 (ert-deftest dsh-bridge-send-text-records-history ()
   "A successful send records the prompt into the session history cache."
-  (let ((dsh-bridge-target-session "s1")
+  (let ((dsh-bridge-default-session "s1")
         (dsh-bridge--prompt-history nil))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path payload callback)
@@ -518,20 +652,244 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
     (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
                    (list "hello")))))
 
-(ert-deftest dsh-bridge-obsolete-aliases ()
-  "The pre-interface command names are aliases of the new verbs."
-  (should (eq (symbol-function 'dsh-bridge-send-region) 'dsh-bridge-send))
-  (should (eq (symbol-function 'dsh-bridge-send-buffer) 'dsh-bridge-send))
-  (should (eq (symbol-function 'dsh-bridge-get-output) 'dsh-bridge-fetch))
-  (should (eq (symbol-function 'dsh-bridge-pull-inbox) 'dsh-bridge-inbox))
-  (should (eq (symbol-function 'dsh-bridge-send-draft-region) 'dsh-bridge-draft))
-  (should (eq (symbol-function 'dsh-bridge-send-draft-buffer) 'dsh-bridge-draft)))
+;;; The view buffers
+
+(ert-deftest dsh-bridge-view-mode-basics ()
+  "The view mode is read-only and binds g/q/r/w/l — and no compose/fetch/
+targeting verbs."
+  (with-temp-buffer
+    (dsh-bridge-view-mode)
+    (should buffer-read-only)
+    (should (eq major-mode 'dsh-bridge-view-mode)))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "g")) #'revert-buffer))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "q")) #'quit-window))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "r")) #'dsh-bridge-reply))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "w"))
+              #'dsh-bridge-copy-reply))
+  (should (eq (lookup-key dsh-bridge-view-mode-map (kbd "l"))
+              #'dsh-bridge-list-sessions))
+  (dolist (key '("s" "d" "f" "t" "u"))
+    (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd key))
+                    (cadr (assoc key dsh-bridge--verb-suffixes))))))
+
+(ert-deftest dsh-bridge-view-mode-gfm ()
+  "When markdown-mode is loadable, the view mode font-locks GFM without
+inheriting markdown's keymap."
+  (when (require 'markdown-mode nil t)
+    (with-temp-buffer
+      (insert "# Heading\n")
+      (dsh-bridge-view-mode)
+      (should (derived-mode-p 'special-mode))
+      (should font-lock-defaults)
+      (should markdown-fontify-code-blocks-natively)
+      (should buffer-read-only)
+      ;; Markdown's outline keys must not leak into the view keymap.
+      (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd "p"))
+                      #'markdown-outline-previous))
+      (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd "n"))
+                      #'markdown-outline-next)))))
+
+(ert-deftest dsh-bridge-reply-binds-shown-session ()
+  "`dsh-bridge-reply' in the output buffer binds the prompt to the shown
+session and never touches the default target."
+  (let ((dsh-bridge-default-session "target")
+        (bound nil) (popped nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "shown")
+      (cl-letf (((symbol-function 'dsh-bridge--session-live-p) (lambda (_) t))
+                ((symbol-function 'dsh-bridge--set-prompt-session)
+                 (lambda (id) (setq bound id)))
+                ((symbol-function 'dsh-bridge--prompt-buffer)
+                 (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (buf action) (setq popped (list buf action)))))
+        (dsh-bridge-reply))
+      (should (equal bound "shown"))
+      (should (equal dsh-bridge-default-session "target"))
+      (should (equal (car popped) (get-buffer-create "*dsh-bridge-prompt*")))
+      (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
+
+(ert-deftest dsh-bridge-reply-not-live-message ()
+  "Reply to a dead shown session gives the not-live message, no binding."
+  (let ((dsh-bridge--sessions-cache '(((id . "gone") (live . nil))))
+        (bound nil) (msg nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "gone")
+      (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+                 (lambda (id) (setq bound id)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-reply))
+      (should (null bound))
+      (should (string-match-p "not live" msg)))))
+
+(ert-deftest dsh-bridge-copy-reply ()
+  "`dsh-bridge-copy-reply' copies the whole reply without a region."
+  (with-temp-buffer
+    (insert "the reply")
+    (dsh-bridge-view-mode)
+    (setq-local dsh-bridge--view-content-session "s1")
+    (let ((killed nil))
+      (cl-letf (((symbol-function 'copy-region-as-kill)
+                 (lambda (beg end) (setq killed (buffer-substring beg end)))))
+        (dsh-bridge-copy-reply))
+      (should (equal killed "the reply")))))
+
+;;; Receive (the DSH→Emacs push; the outbox is invisible transport)
+
+(defconst dsh-bridge-test--receive-response
+  (cons 200
+        (list (cons 'entries
+                    (list (list (cons 'id "e1")
+                                (cons 'sessionId "s1")
+                                (cons 'source "message-action")
+                                (cons 'text "older")
+                                (cons 'ts 1000000))
+                          (list (cons 'id "e2")
+                                (cons 'sessionId "s2")
+                                (cons 'source "message-action")
+                                (cons 'text "newest")
+                                (cons 'ts 2000000))))
+              (cons 'overflowed nil))))
+
+(ert-deftest dsh-bridge-receive-shows-newest-and-acks-all ()
+  "Receive displays the newest pending entry in the output buffer and acks
+every collected id."
+  (let (acked-payload)
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (cond
+                  ((equal method "GET") dsh-bridge-test--receive-response)
+                  ((equal method "POST") (setq acked-payload payload)
+                   (cons 200 (list (cons 'ok t))))
+                  (t (cons 404 (list (cons 'error "unexpected"))))))))
+      (dsh-bridge-receive))
+    (should (equal acked-payload '((ids . ("e1" "e2")))))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal (buffer-string) "newest"))
+      (should (equal dsh-bridge--view-content-session "s2"))
+      (should (string-match-p "received from: s2"
+                              (format "%s" header-line-format)))
+      (should (string-match-p " · sent "
+                              (format "%s" header-line-format))))))
+
+(ert-deftest dsh-bridge-receive-multiple-messages-message ()
+  "Several pending entries produce the honest 'showing the latest' message."
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge-receive))
+    (should (string-match-p "2 messages received, showing the latest" msg))))
+
+(ert-deftest dsh-bridge-receive-does-not-pop ()
+  "Receive fills the output buffer without selecting it."
+  (let ((popped nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
+                       (t (cons 200 (list (cons 'ok t)))))))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
+      (dsh-bridge-receive))
+    (should (null popped))))
+
+(ert-deftest dsh-bridge-receive-nothing-pending ()
+  "With nothing pending, receive says so and leaves the output alone."
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cons 200 (list (cons 'entries nil)))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge-receive))
+    (should (string-match-p "nothing to receive" msg))))
+
+(ert-deftest dsh-bridge-receive-sets-workspace-best-effort ()
+  "Receive points the output buffer at the session's workspace when known."
+  (let ((dsh-bridge--sessions-cache '(((id . "s2") (cwd . "/w/sess2") (live . t)))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method _path _payload)
+                 (cond ((equal method "GET") dsh-bridge-test--receive-response)
+                       (t (cons 200 (list (cons 'ok t))))))))
+      (dsh-bridge-receive))
+    (with-current-buffer "*dsh-bridge-output*"
+      (should (equal default-directory "/w/sess2/")))))
+
+;;; The sessions list
+
+(ert-deftest dsh-bridge-sessions-keymap ()
+  "RET/r open, t sets the default target, u clears it, f peeks, and p is
+previous-line again."
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "RET"))
+              #'dsh-bridge-open-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "r"))
+              #'dsh-bridge-open-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "t"))
+              #'dsh-bridge-set-default-target-at-point))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "u"))
+              #'dsh-bridge-clear-default-target))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "f"))
+              #'dsh-bridge-peek-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "v"))
+              #'dsh-bridge-toggle-sessions-display))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "w"))
+              #'dsh-bridge-copy-session-id))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "D"))
+              #'dsh-bridge-describe-session))
+  ;; `p' inherits previous-line from tabulated-list-mode again.
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "p"))
+              #'previous-line)))
+
+(ert-deftest dsh-bridge-open-session-binds-prompt-not-default ()
+  "RET binds the prompt buffer to the row's session; the default target is
+untouched."
+  (let ((dsh-bridge--sessions-cache '(((id . "live-1") (live . t) (cwd . "/w"))))
+        (dsh-bridge-default-session "default")
+        (bound nil) (popped nil))
+    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () "live-1"))
+              ((symbol-function 'dsh-bridge--set-prompt-session)
+               (lambda (id) (setq bound id)))
+              ((symbol-function 'dsh-bridge--prompt-buffer)
+               (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
+      (dsh-bridge-open-session))
+    (should (equal bound "live-1"))
+    (should (equal dsh-bridge-default-session "default"))
+    (should popped)))
+
+(ert-deftest dsh-bridge-open-session-not-live-message ()
+  "RET on a saved row reports the consistent not-live message."
+  (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
+        (bound nil) (msg nil))
+    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () "saved-1"))
+              ((symbol-function 'dsh-bridge--set-prompt-session)
+               (lambda (id) (setq bound id)))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (dsh-bridge-open-session))
+    (should (null bound))
+    (should (string-match-p "not live" msg))))
+
+(ert-deftest dsh-bridge-set-default-target-at-point ()
+  "`t' sets the default target to the row's session."
+  (let ((dsh-bridge--sessions-cache '(((id . "live-1") (live . t))))
+        (dsh-bridge-default-session nil))
+    (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () "live-1"))
+              ((symbol-function 'dsh-bridge-set-default-target)
+               (lambda (id) (setq dsh-bridge-default-session id))))
+      (dsh-bridge-set-default-target-at-point))
+    (should (equal dsh-bridge-default-session "live-1"))))
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()
   "The session list shows marker/R/Session/Age/Workspace columns."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-target-session "live-1"))
+  (let ((dsh-bridge-default-session "live-1"))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  '(((id . "live-1") (live . t) (running . t) (title . "First live")
@@ -552,10 +910,10 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
              (saved-cells (cadr saved)))
         (should live)
         (should saved)
-        ;; Pin marker (index 0): "*" + face for the target, a space otherwise.
+        ;; Default-target marker (index 0): "*" + face for the default target.
         (should (equal (aref live-cells 0) "*"))
         (should (eq (get-text-property 0 'face (aref live-cells 0))
-                    'dsh-bridge-current-target-face))
+                    'dsh-bridge-default-target-face))
         (should (equal (aref saved-cells 0) " "))
         ;; Running marker (index 1): "…" when running, a space otherwise.
         (should (equal (aref live-cells 1) "…"))
@@ -576,11 +934,23 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
         (should (equal (aref live-cells 4) "a"))
         (should (equal (aref saved-cells 4) "b"))))))
 
+(ert-deftest dsh-bridge-session-cell-disambiguates-untitled ()
+  "Untitled cells that collide gain a short-id qualifier; unique ones stay
+plain."
+  (let ((a '((id . "aaaaaa") (live . t) (cwd . "/x")))
+        (b '((id . "bbbbbb") (live . t) (cwd . "/x"))))
+    (should (string-match-p "Untitled session$"
+                            (dsh-bridge--session-cell a nil)))
+    (should (string-match-p "Untitled session · aaaaaa"
+                            (dsh-bridge--session-cell a (list a b))))
+    (should (string-match-p "Untitled session · bbbbbb"
+                            (dsh-bridge--session-cell b (list a b))))))
+
 (ert-deftest dsh-bridge-list-sessions-shows-ids-when-enabled ()
   "With `dsh-bridge-show-session-ids' non-nil, an Id column appears."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-target-session nil)
+  (let ((dsh-bridge-default-session nil)
         (dsh-bridge-show-session-ids t))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () '(((id . "live-1") (live . t) (cwd . "/a")))))
@@ -596,7 +966,7 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
   "Display modes cycle live+saved, live, and live+saved+archived."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-target-session nil))
+  (let ((dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  '(((id . "live-1") (live . t) (cwd . "/a"))
@@ -643,25 +1013,6 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
     (should (dsh-bridge--session-visible-p '((live . nil) (archived . t))))
     (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))))
 
-(ert-deftest dsh-bridge-session-label-precedence ()
-  "The label is the title, else the cwd basename, else the raw id."
-  (should (equal (dsh-bridge--session-label '((title . "T") (cwd . "/x") (id . "i")))
-                 "T"))
-  (should (equal (dsh-bridge--session-label '((cwd . "/x/y") (id . "i"))) "y"))
-  (should (equal (dsh-bridge--session-label '((cwd . "/x/") (id . "i"))) "x"))
-  (should (equal (dsh-bridge--session-label '((id . "i"))) "i"))
-  (should (equal (dsh-bridge--session-label '((title . "") (cwd . "/x") (id . "i")))
-                 "x")))
-
-(ert-deftest dsh-bridge-workspace-label ()
-  "The workspace label is the title, else the cwd basename, else the cwd."
-  (should (equal (dsh-bridge--workspace-label '((workspace . "proj") (cwd . "/x/y")))
-                 "proj"))
-  (should (equal (dsh-bridge--workspace-label '((cwd . "/x/y"))) "y"))
-  (should (equal (dsh-bridge--workspace-label '((cwd . "/x/"))) "x"))
-  (should (equal (dsh-bridge--workspace-label '((cwd . "/"))) "/"))
-  (should (equal (dsh-bridge--workspace-label '((id . "i"))) "")))
-
 (ert-deftest dsh-bridge-running-marker ()
   "The running marker is \"…\" when running, a space otherwise."
   (should (equal (dsh-bridge--running-marker '((running . t))) "…"))
@@ -680,7 +1031,7 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
 
 (ert-deftest dsh-bridge-sessions-revert-refetches ()
   "`g' in the sessions buffer re-fetches the list from the host."
-  (let ((dsh-bridge-target-session nil))
+  (let ((dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda () '(((id . "live-1") (live . t) (cwd . "/a")))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
@@ -695,34 +1046,22 @@ binds C-c C-c / C-c C-d / C-c C-k plus the history keys."
       (should (assoc "live-2" entries))
       (should-not (assoc "live-1" entries)))))
 
-(ert-deftest dsh-bridge-unpin-session ()
-  "`dsh-bridge-unpin-session' POSTs a null sessionId and clears the pin."
-  (let ((captured nil)
-        (dsh-bridge-target-session "pinned"))
-    (cl-letf (((symbol-function 'dsh-bridge--request)
-               (lambda (method path payload)
-                 (setq captured (list method path payload))
-                 (cons 200 (list (cons 'ok t)))))
-              ((symbol-function 'dsh-bridge--fetch-sessions)
-               (lambda () nil)))
-      (dsh-bridge-unpin-session))
-    (should (equal (car captured) "POST"))
-    (should (equal (cadr captured) "/select"))
-    (should (equal (caddr captured) '((sessionId . nil))))
-    (should (null dsh-bridge-target-session))))
+;;; Dispatcher and menus
 
-(ert-deftest dsh-bridge-unpin-encodes-null ()
-  "The unpin payload encodes sessionId as JSON null, not the string \"json-null\"."
-  (should (equal (json-encode '((sessionId . nil))) "{\"sessionId\":null}")))
-
-(ert-deftest dsh-bridge-dispatcher-shares-view-letters ()
-  "Every dispatcher verb is bound to the same command in the view buffers,
-and the dispatcher layout contains the same keys."
+(ert-deftest dsh-bridge-dispatcher-suffixes ()
+  "Every verb is a dispatcher suffix; the inbox (`i') and the `S' mnemonic
+are gone, and targeting lives on `t'/`u'."
   (dolist (spec dsh-bridge--verb-suffixes)
-    (should (eq (lookup-key dsh-bridge-view-mode-map (kbd (car spec)))
-                (cadr spec)))
-    ;; Use transient's public API to check the dispatcher layout.
-    (should (transient-get-suffix 'dsh-bridge (car spec)))))
+    (should (transient-get-suffix 'dsh-bridge (car spec))))
+  (should (transient-get-suffix 'dsh-bridge "t"))
+  (should (transient-get-suffix 'dsh-bridge "u"))
+  ;; `transient-get-suffix' signals when the key is absent.
+  (should-not (condition-case nil
+                  (progn (transient-get-suffix 'dsh-bridge "i") t)
+                (error nil)))
+  (should-not (condition-case nil
+                  (progn (transient-get-suffix 'dsh-bridge "S") t)
+                (error nil))))
 
 (ert-deftest dsh-bridge-mode-menus ()
   "Each dsh-bridge mode installs a menu-bar menu."
@@ -731,6 +1070,8 @@ and the dispatcher layout contains the same keys."
                        dsh-bridge-view-mode-map
                        dsh-bridge-prompt-mode-map))
       (should (lookup-key map key)))))
+
+;;; SSE machinery (unchanged behavior)
 
 (ert-deftest dsh-bridge-chunked-decode ()
   "HTTP/1.1 chunked transfer encoding is decoded byte-for-byte."
@@ -770,7 +1111,7 @@ and the dispatcher layout contains the same keys."
     (should (equal (cdr result) ""))))
 
 (ert-deftest dsh-bridge-outbox-notice-p ()
-  "Only outbox-kind events are treated as inbox notices."
+  "Only outbox-kind events trigger a receive."
   (should (dsh-bridge--outbox-notice-p '(((kind . "outbox")))))
   (should-not (dsh-bridge--outbox-notice-p '(((kind . "draft")))))
   (should-not (dsh-bridge--outbox-notice-p nil)))

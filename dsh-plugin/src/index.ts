@@ -15,17 +15,18 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //
 // Routes (all require `Authorization: Bearer <token>` — except the token-vend
-// and browser-SSE routes; see logic.ts for the pure decision logic):
+// and browser-SSE routes; see logic.ts for the pure decision logic).  There is
+// no host-side target pin: the host resolves "no sessionId" to last-active
+// (see the UX plan, Section 3.2), so `/select` and `/current` do not exist.
 //   GET  /dsh-bridge/token                          -> vend the token (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
 //   GET  /dsh-bridge/sessions                     -> live + persisted sessions
-//   POST /dsh-bridge/select { sessionId | null }  -> pin the target session
-//   GET  /dsh-bridge/current                      -> the pinned target (or null)
 //   POST /dsh-bridge/draft { text, sessionId? }   -> push a composer draft (SSE)
 //   GET  /dsh-bridge/outbox                       -> collect DSH->Emacs entries
-//   POST /dsh-bridge/outbox { text, sessionId?, source? } -> deposit an entry
+//   POST /dsh-bridge/outbox { text, sessionId, source? } -> deposit an entry
+//        (sessionId required: every entry is session-scoped)
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -45,6 +46,7 @@ import {
   latestAssistantText,
   mergeSessionRows,
   outboxMessage,
+  outboxSessionId,
   parseBearerAuthorization,
   resolveTargetId,
   sessionTitle,
@@ -190,9 +192,6 @@ export function apply(ctx: Context): void {
   /** Browser EventSource clients subscribed to the composer-draft push. */
   const sseClients = new Set<ServerResponse>()
 
-  /** The session id pinned by `/select`; undefined means last-active. */
-  let selectedSessionId: string | undefined
-
   /** Whether a live session is owned by its live parent agent. */
   function ownedByLiveParent(session: Session): boolean {
     const parentId = session.header.parentSession
@@ -236,7 +235,7 @@ export function apply(ctx: Context): void {
 
   /** Resolve a request's effective target via the pure precedence logic. */
   function resolveTarget(explicitId: string | undefined): ResolveTargetResult {
-    return resolveTargetId(explicitId, selectedSessionId, targetableSessions(), hasAgent)
+    return resolveTargetId(explicitId, targetableSessions(), hasAgent)
   }
 
   /**
@@ -357,15 +356,6 @@ export function apply(ctx: Context): void {
         return
       }
 
-      if (req.method === 'GET' && pathname === '/dsh-bridge/current') {
-        // A pin is only truthful while it still resolves to a drivable target.
-        if (selectedSessionId !== undefined && !isLiveTarget(selectedSessionId)) {
-          selectedSessionId = undefined
-        }
-        sendJson(res, 200, { sessionId: selectedSessionId ?? null })
-        return
-      }
-
       if (req.method === 'POST' && pathname === '/dsh-bridge/draft') {
         try {
           const body = (await readJson(req)) as { sessionId?: unknown; text?: unknown } | undefined
@@ -422,9 +412,16 @@ export function apply(ctx: Context): void {
             sendJson(res, 400, { error: 'text is required' })
             return
           }
+          // Every entry is session-scoped (UX plan 2, Section 1.4): a deposit
+          // without a sessionId is a contract violation, not a bridge message.
+          const sessionId = outboxSessionId(body)
+          if (sessionId === null) {
+            sendJson(res, 400, { error: 'sessionId is required' })
+            return
+          }
           const evicted = outbox.deposit({
             id: randomUUID(),
-            sessionId: typeof body?.sessionId === 'string' ? body.sessionId : undefined,
+            sessionId,
             source: typeof body?.source === 'string' ? body.source : 'bridge',
             text,
             ts: Date.now(),
@@ -451,36 +448,6 @@ export function apply(ctx: Context): void {
             : []
           outbox.ack(ids)
           sendJson(res, 200, { ok: true, acked: ids.length })
-        } catch (error: unknown) {
-          const status = error instanceof PayloadTooLargeError ? 413 : 500
-          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
-        }
-        return
-      }
-
-      if (req.method === 'POST' && pathname === '/dsh-bridge/select') {
-        try {
-          const body = (await readJson(req)) as { sessionId?: unknown } | undefined
-          const id = body?.sessionId
-          if (id === null || id === undefined) {
-            selectedSessionId = undefined
-            sendJson(res, 200, { ok: true, sessionId: null })
-            return
-          }
-          if (typeof id !== 'string' || id === '') {
-            sendJson(res, 400, { error: 'sessionId must be a non-empty string or null' })
-            return
-          }
-          if (!targetableSessions().some(session => session.id === id)) {
-            sendJson(res, 404, { error: `session ${id} is not live` })
-            return
-          }
-          if (!hasAgent(id)) {
-            sendJson(res, 409, { error: `session ${id} has no live agent` })
-            return
-          }
-          selectedSessionId = id
-          sendJson(res, 200, { ok: true, sessionId: id })
         } catch (error: unknown) {
           const status = error instanceof PayloadTooLargeError ? 413 : 500
           sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })

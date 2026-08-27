@@ -192,20 +192,24 @@ export function mergeSessionRows(
   return rows
 }
 
-/** The outcome of resolving a request's target session id. */
+/**
+ * The outcome of resolving a request's target session id.
+ */
 export type ResolveTargetResult =
   | { kind: 'target'; id: string }
   | { kind: 'error'; status: 404 | 409; message: string }
 
 /**
- * Resolve the effective target session id. Precedence: an explicit id, then a
- * pinned id, then last-active. A non-live explicit id is 404; a live session
- * with no live agent is 409; no targetable session at all is 409. `hasAgent`
- * is supplied by the caller (it consults the live agent registry).
+ * Resolve the effective target session id. Precedence: an explicit id, then
+ * last-active. There is no host-side pin (see the UX plan, Section 3.2): a nil
+ * explicit id always means the host's own most-recently-active live session,
+ * so "last-active" has exactly one meaning and no second store can shadow it.
+ * A non-live explicit id is 404; a live session with no live agent is 409; no
+ * targetable session at all is 409. `hasAgent` is supplied by the caller (it
+ * consults the live agent registry).
  */
 export function resolveTargetId(
   explicitId: string | undefined,
-  selectedId: string | undefined,
   live: readonly LiveSessionLike[],
   hasAgent: (id: string) => boolean,
 ): ResolveTargetResult {
@@ -215,11 +219,6 @@ export function resolveTargetId(
     if (session === undefined) return { kind: 'error', status: 404, message: `session ${explicitId} is not live` }
     if (!hasAgent(session.id)) return { kind: 'error', status: 409, message: `session ${explicitId} has no live agent` }
     return { kind: 'target', id: session.id }
-  }
-  if (selectedId !== undefined) {
-    const session = find(selectedId)
-    if (session !== undefined && hasAgent(session.id)) return { kind: 'target', id: session.id }
-    // A dead pin falls back to last-active.
   }
   let best: string | undefined
   let bestTime = -Infinity
@@ -240,6 +239,17 @@ export function parseBearerAuthorization(header: string | undefined): string | u
   if (header === undefined) return undefined
   const match = /^Bearer\s+(\S+)$/.exec(header)
   return match?.[1]
+}
+
+/**
+ * The required session id of a `/outbox` deposit, or null when missing or
+ * malformed.  Every DSH→Emacs entry is session-scoped (UX plan 2, Section
+ * 1.4): the browser "Send to Emacs" action always knows its session, so the
+ * route makes the premise a contract instead of an empirical property.
+ */
+export function outboxSessionId(body: { sessionId?: unknown } | undefined): string | null {
+  const id = body?.sessionId
+  return typeof id === 'string' && id !== '' ? id : null
 }
 
 /** Constant-time comparison of two token strings. */
