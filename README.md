@@ -21,7 +21,30 @@ It consists of two components:
 - Emacs 29 or later.
 - (Recommended) The [`markdown-mode`](https://jblevins.org/projects/markdown-mode/) Emacs package.
 
-### Build the plugin
+### Emacs package
+
+The project can be bundled into a single Emacs package that also
+stores the DSH plugin.  This requires both `dsh` and `pnpm` to
+installed on `$PATH`.  First, build the package tarball from this
+repository's root directory:
+
+```sh
+make package
+```
+
+Then, in Emacs, run:
+
+1. `M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET`
+2. `M-x dsh-bridge-install-plugin` — install bundled plugin into DSH
+   (customize `dsh-bridge-profile` to use a non-default profile).
+3. Restart `dsh web`.
+
+### Manual compilation and installation
+
+Alternatively, you can build/install the DSH plugin and Emacs library
+manually.
+
+#### Build the DeepSeek Harness plugin
 
 From this repository's root directory:
 
@@ -40,7 +63,7 @@ directly:
 ./node_modules/.bin/tsdown && ./node_modules/.bin/tsdown --config tsdown.client.config.ts
 ```
 
-### Install the DeepSeek Harness plugin
+#### Install the DeepSeek Harness plugin
 
 How you install the plugin depends on how DSH was installed.  If you
 have a global install with `dsh` on PATH:
@@ -61,7 +84,7 @@ pnpm dsh plugin --profile web add link:/absolute/path/to/dsh-emacs-bridge/dsh-pl
 pnpm dsh web
 ```
 
-### Install the Emacs package
+#### Install the Emacs package
 
 Put this in your Emacs init file (`~/.emacs.d/init.el` or `~/.emacs`),
 replacing the path with the actual path to `dsh-bridge.el`.
@@ -72,24 +95,6 @@ replacing the path with the actual path to `dsh-bridge.el`.
 
 Alternatively, copy `dsh-bridge.el` into your Emacs load-path and do
 `(require 'dsh-bridge)`.
-
-### Alternative: Emacs package
-
-Instead of the manual steps above, everything can be installed as a
-single Emacs package.  First, build the package tar from this
-repository's root directory:
-
-```sh
-make package
-```
-
-Then, in Emacs:
-
-1. `M-x package-install-file RET /path/to/dsh-bridge-<version>.tar RET`
-2. `M-x dsh-bridge-install-plugin` — install bundled plugin into DSH
-   (customize `dsh-bridge-profile` to use a non-default profile).
-   This requires `dsh` and `pnpm` to both be on PATH.
-3. Restart `dsh web`.
 
 ## Usage
 
