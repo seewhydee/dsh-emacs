@@ -98,9 +98,9 @@ The following commands are available from the transient menu:
 
 * `q` — exit the transient menu.
 * `r` — open a DSH-Prompt buffer for the session.
-* `s` — send the region, or the whole buffer, as a prompt.
-* `d` — send the region, or the whole buffer as a *draft*; you can
-        still edit it in the DSH composer before submitting.
+* `s` — send the region or buffer as a prompt.
+* `d` — send the region or buffer as a draft (can
+        still edit in DSH composer before submitting).
 * `f` — fetch the session's latest reply into the DSH-View buffer.
 * `t` — set the default target session.
 * `u` — clear the default target session.
@@ -108,10 +108,9 @@ The following commands are available from the transient menu:
 
 ### Sessions menu
 
-The `M-x dsh-bridge-list-sessions` command opens a DSH-Sessions
-buffer, named `*dsh-bridge-sessions*`, listing DSH's sessions.  The
-default target session (if any) is marked by a `*` in the leftmost
-column.
+The `M-x dsh-bridge-list-sessions` command opens a buffer with a list
+of DSH sessions.  The default target session (if any) is marked by a
+`*` in the leftmost column.
 
 The following commands are available from the DSH-Sessions buffer:
 
@@ -124,8 +123,8 @@ The following commands are available from the DSH-Sessions buffer:
         `live+saved+archived`.
 * `g` — refresh the DSH-Sessions buffer.
 
-For a full list, refer to the menu bar.  Other `tabulated-list-mode`
-keys are also available.
+For a full list, see the menu bar.  Other `tabulated-list-mode` keys
+are also available.
 
 ### DSH-View buffer
 
@@ -153,9 +152,9 @@ This buffer is used to compose a prompt, or reply, for a DSH session.
 It is opened by `r`/`RET` from the DSH-Sessions buffer, and `r` from
 the transient menu or DSH-View buffer.
 
-The session for the prompt applies to determined by how it was
-invoked; e.g., `r` from a DSH-View buffer opens a prompt for the same
-session.
+The session to which the prompt applies is determined by how this
+buffer was invoked; e.g., `r` from a DSH-View buffer opens a prompt
+for the same session.
 
 The following commands are available from the DSH-Prompt buffer:
 
@@ -171,24 +170,14 @@ most markdown editing commands are also available.
 
 ### DSH→Emacs text: fetch and receive
 
-`*dsh-bridge-output*` holds the assistant text Emacs currently has for a
-session, however it arrived — a `fetch` (pull, the latest reply) or a
-"Send to Emacs" push from the web UI (a specific message).  The header says
-`reply from: <session> · refreshed <time>` for a fetch and
-`received from: <session> · sent <time>` for a push (the message's own send
-time).  There is no inbox: the delivery queue is invisible plumbing, and
-`r`/`w` in the output buffer act on the shown session's text either way.
+The DSH plugin adds a "Send to Emacs" button that lets you push
+specific assistant messages to Emacs.
 
-With `dsh-bridge-notifications` non-nil (the default), Emacs subscribes to the
-bridge's event stream (starting lazily on first use) and automatically fills
-`*dsh-bridge-output*` with new "Send to Emacs" messages as they arrive —
-without popping the buffer, so an unsolicited push never steals focus.
-`dsh-bridge-notifications-start` / `dsh-bridge-notifications-stop` control the
-listener.
-
-The corresponding commands are `M-x dsh-bridge-fetch` (pull the latest
-reply) and `M-x dsh-bridge-receive` (pull the latest "Send to Emacs"
-message — the manual fallback when notifications are off).
+With `dsh-bridge-notifications` non-nil (the default), Emacs
+subscribes to the bridge's event stream (starting lazily on first use)
+and automatically updates the DSH-View buffer.  If you disable this
+option, you can use `i` from the transient menu (or run `M-x
+dsh-bridge-receive`) to pull the latest message pushed by DSH.
 
 ## Authentication
 
