@@ -37,6 +37,9 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
     DSH→Emacs inbox; every entry is session-scoped; deposits fan an SSE
     notice out to all subscribers.
   - `GET /token` → vends the shared token (fenced to loopback peer + origin).
+  - `GET /status` → `{ name, version }` (loopback-fenced), the probe/identity
+    route: Emacs distinguishes "not running" / "not loaded" / "stale" and can
+    compare the running version against the bundled one after an upgrade.
   - `GET /events?token=` → SSE stream (composer-draft push + outbox notices).
 - Auth: shared bearer token at `$DSH_HOME/dsh-bridge-token` (generated on
   first use, mode 0600), required on every route except the two above.
@@ -70,6 +73,22 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
 - HTTP via `url-retrieve` + `json.el`, bearer token read from the token file.
 - `dsh-bridge-install-plugin`: installs the bundled plugin build into a DSH
   profile (`dsh-bridge-profile`, default `web`) via `dsh plugin add file:...`.
+- Plugin probing and management: every request probes `/dsh-bridge/token`
+  first (per-session cache, dropped on contradicting evidence), and
+  `dsh-bridge--ensure-plugin` diagnoses precisely — "dsh web not running" vs
+  "installed but not loaded" vs "not installed" — offering a latched,
+  asynchronous install on first failure (`dsh-bridge-install-plugin-offer`,
+  default `ask`) and a one-time first-load pointer when the manifest lacks
+  the plugin.  A running plugin's version is compared once per session
+  against the bundled payload via `GET /dsh-bridge/status`, with a
+  reinstall-and-restart pointer on mismatch.  `dsh-bridge-uninstall-plugin`
+  pre-checks the profile manifest (pnpm's `remove` of an absent package
+  exits 1) and both install paths validate the composed tree with
+  `dsh --profile <profile> --dump-config` (asynchronously, on the offer path)
+  before suggesting a restart.  The `dsh` CLI itself is resolved via
+  `dsh-bridge-dsh-command` (auto-detect, memoized per session: PATH → npm
+  global bin → `npx --yes @deepseek-ai/dsh`), since the standard installs
+  (`npx @deepseek-ai/dsh web`, `pnpm dsh web`) do not put `dsh` on PATH.
 
 **Tests:** Vitest for the plugin's pure logic (`pnpm test` in `dsh-plugin/`);
 ERT for the Elisp helpers (`emacs --batch`).
@@ -146,6 +165,14 @@ indicator) are parked pending a decision on what the web UI side should grow.
 - `emacsclient` push for text transfer (pull won; push may still be wanted for
   the edit flow's file-opens).
 - Binding the route beyond loopback (would need real auth, TLS, origin checks).
+- **Plugin-management non-goals.** Unattended auto-install (a broken bundle
+  fails the entire `dsh web` boot, so installs stay user-confirmed and
+  validated); unattended auto-start of `dsh web` (Emacs does not own the
+  process; a user-confirmed background start is a possible later addition);
+  offering to *restart* a running server (would kill in-flight agent
+  sessions); tandem install/uninstall via package.el hooks (package.el
+  deliberately has none); reverse bundling (the Emacs package inside the dsh
+  plugin) — the plugin-as-payload direction stands.
 
 ## References
 

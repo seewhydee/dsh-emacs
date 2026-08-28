@@ -47,8 +47,9 @@ $(TAR): build emacs/dsh-bridge.el dsh-plugin/package.json dsh-plugin/cordis.patc
 	sed -i 's/"version": "[^"]*"/"version": "$(VERSION)"/' $(STAGE)/dsh-plugin/package.json
 	cp dsh-plugin/lib/index.js dsh-plugin/lib/client.js $(STAGE)/dsh-plugin/lib/
 	printf '%s\n' \
+	  ';; -*- no-byte-compile: t -*-' \
 	  '(define-package "dsh-bridge" "$(VERSION)"' \
-	  '  "Two-way bridge between Emacs and a running DeepSeek Harness session."' \
+	  '  "Connect Emacs to a DeepSeek Harness session."' \
 	  '  (quote ((emacs "29.1"))))' \
 	  > $(STAGE)/dsh-bridge-pkg.el
 	tar --format=ustar -cf $@ -C .package dsh-bridge-$(VERSION)

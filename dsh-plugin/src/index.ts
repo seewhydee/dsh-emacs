@@ -19,6 +19,7 @@
 // no host-side target pin: the host resolves "no sessionId" to last-active
 // (see the UX plan, Section 3.2), so `/select` and `/current` do not exist.
 //   GET  /dsh-bridge/token                          -> vend the token (loopback-fenced)
+//   GET  /dsh-bridge/status                         -> { name, version } (loopback-fenced)
 //   GET  /dsh-bridge/events?token=                  -> EventSource (composer-draft push)
 //   POST /dsh-bridge/send   { text, sessionId? } -> Agent.followup()
 //   GET  /dsh-bridge/output?sessionId=           -> latest assistant text
@@ -47,6 +48,7 @@ import {
   isLoopbackAddress,
   isSubagentChild,
   latestAssistantText,
+  manifestVersion,
   mergeSessionRows,
   outboxMessage,
   outboxSessionId,
@@ -181,6 +183,23 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   const payload = JSON.stringify(value)
   res.writeHead(status, { 'content-type': 'application/json' })
   res.end(payload)
+}
+
+/**
+ * The plugin's own version, read lazily from its installed package.json.
+ * Deliberately defensive: the `/status` route is a diagnostic nicety, and a
+ * read failure here must never fail the boot (a broken bundle entry fails
+ * the *entire* `dsh web` start).  `lib/index.js` sits one level below the
+ * package root, so `../package.json` resolves to it.
+ */
+function pluginVersion(): string | null {
+  try {
+    return manifestVersion(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    )
+  } catch {
+    return null
+  }
 }
 
 export function apply(ctx: Context): void {
@@ -323,6 +342,20 @@ export function apply(ctx: Context): void {
           return
         }
         sendJson(res, 200, { token })
+        return
+      }
+
+      // Identity/version probe, for Emacs's staleness detection.  Read-only
+      // and loopback-fenced like `/token` (the version is not sensitive):
+      // Emacs queries it before it necessarily holds a bearer token, and the
+      // response lets it distinguish a stale installed copy from a fresh one.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/status') {
+        if (!isLoopbackAddress(req.socket.remoteAddress)
+          || !tokenRequestsSameOrigin(req.headers.host, req.headers.origin)) {
+          sendJson(res, 403, { error: 'forbidden' })
+          return
+        }
+        sendJson(res, 200, { name: 'dsh-emacs-bridge', version: pluginVersion() })
         return
       }
 

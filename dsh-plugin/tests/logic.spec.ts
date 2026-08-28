@@ -8,6 +8,7 @@ import {
   isLoopbackOrigin,
   isSubagentChild,
   latestAssistantText,
+  manifestVersion,
   mergeSessionRows,
   outboxMessage,
   outboxSessionId,
@@ -294,6 +295,23 @@ describe('outboxSessionId', () => {
     expect(outboxSessionId({})).toBeNull()
     expect(outboxSessionId({ sessionId: 42 })).toBeNull()
     expect(outboxSessionId({ sessionId: '' })).toBeNull()
+  })
+})
+
+describe('manifestVersion', () => {
+  it('returns the version from a valid manifest', () => {
+    expect(manifestVersion('{"version":"0.1.0"}')).toBe('0.1.0')
+  })
+
+  it('returns null for missing, empty, or non-string versions', () => {
+    expect(manifestVersion('{"name":"x"}')).toBeNull()
+    expect(manifestVersion('{"version":""}')).toBeNull()
+    expect(manifestVersion('{"version":42}')).toBeNull()
+  })
+
+  it('returns null for malformed or missing manifests', () => {
+    expect(manifestVersion('not json')).toBeNull()
+    expect(manifestVersion(undefined)).toBeNull()
   })
 })
 

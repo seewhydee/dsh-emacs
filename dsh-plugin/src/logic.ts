@@ -273,6 +273,22 @@ export function outboxSessionId(body: { sessionId?: unknown } | undefined): stri
   return typeof id === 'string' && id !== '' ? id : null
 }
 
+/**
+ * The `version` field of a package.json manifest TEXT, or null when it is
+ * missing, empty, or the manifest is not valid JSON.  Used by the `/status`
+ * route to report the running plugin's version, so Emacs can detect a stale
+ * installed copy after a package upgrade.
+ */
+export function manifestVersion(manifest: string | undefined): string | null {
+  if (manifest === undefined) return null
+  try {
+    const data = JSON.parse(manifest) as { version?: unknown }
+    return typeof data.version === 'string' && data.version !== '' ? data.version : null
+  } catch {
+    return null
+  }
+}
+
 /** Constant-time comparison of two token strings. */
 export function tokensEqual(expected: string, provided: string): boolean {
   const a = Buffer.from(expected)
