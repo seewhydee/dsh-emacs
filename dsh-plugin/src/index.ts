@@ -57,6 +57,8 @@ import {
   sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
+  turnCompleteMessage,
+  turnStartMessage,
   userPrompts,
   workspaceTitlesBySession,
   type LiveSessionLike,
@@ -214,6 +216,13 @@ export function apply(ctx: Context): void {
   /** Browser EventSource clients subscribed to the composer-draft push. */
   const sseClients = new Set<ServerResponse>()
 
+  /** Write one SSE frame to every subscribed client, dropping dead ones. */
+  function broadcast(frame: string): void {
+    for (const client of [...sseClients]) {
+      try { client.write(frame) } catch { sseClients.delete(client) }
+    }
+  }
+
   /** Whether a live session is owned by its live parent agent. */
   function ownedByLiveParent(session: Session): boolean {
     const parentId = session.header.parentSession
@@ -259,6 +268,22 @@ export function apply(ctx: Context): void {
   function resolveTarget(explicitId: string | undefined): ResolveTargetResult {
     return resolveTargetId(explicitId, targetableSessions(), hasAgent)
   }
+
+  // Push turn lifecycle onto the SSE stream for the Emacs status tracker.
+  // Emitted only for targetable (non-subagent) sessions; the browser client
+  // ignores any kind it does not recognise, so this is backward-compatible.
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'turn/start' && event.type !== 'turn/end') return
+    if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
+    const id = String(session.id)
+    if (event.type === 'turn/start') {
+      broadcast(turnStartMessage(id))
+    } else {
+      const data = event.data as { reason?: unknown } | undefined
+      const reason = data?.reason as { kind?: unknown } | undefined
+      broadcast(turnCompleteMessage(id, typeof reason?.kind === 'string' ? reason.kind : 'unrecognized'))
+    }
+  })
 
   /**
    * Fold a cold session's title. The persisted projection cache serves the
@@ -418,9 +443,7 @@ export function apply(ctx: Context): void {
             return
           }
           const event = draftMessage(result.id, text)
-          for (const client of [...sseClients]) {
-            try { client.write(event) } catch { sseClients.delete(client) }
-          }
+          broadcast(event)
           const target = targetById(result.id)
           sendJson(res, 200, {
             ok: true,
@@ -465,9 +488,7 @@ export function apply(ctx: Context): void {
           // Notify every subscribed client (the browser and Emacs) that new
           // inbox entries are ready.
           const notice = outboxMessage()
-          for (const client of [...sseClients]) {
-            try { client.write(notice) } catch { sseClients.delete(client) }
-          }
+          broadcast(notice)
           sendJson(res, 200, { ok: true, evicted })
         } catch (error: unknown) {
           const status = error instanceof PayloadTooLargeError ? 413 : 500
@@ -550,6 +571,7 @@ export function apply(ctx: Context): void {
           title: sessionTitle(target.session.events),
           cwd: target.session.header.cwd ?? null,
           text: latestAssistantText(target.agent.session.deriveMessages()),
+          running: ctx.agents.get(String(target.session.id))?.status === 'running',
         })
         return
       }
@@ -589,6 +611,7 @@ export function apply(ctx: Context): void {
         sendJson(res, 200, {
           sessionId: String(target.session.id),
           replies: assistantReplies(target.agent.session.deriveMessages()).reverse(),
+          running: ctx.agents.get(String(target.session.id))?.status === 'running',
         })
         return
       }

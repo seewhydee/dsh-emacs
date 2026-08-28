@@ -429,7 +429,9 @@ current buffer has no session of its own."
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path _payload callback)
                  (funcall callback nil
-                          "{\"text\":\"reply text\",\"sessionId\":\"s1\"}" 200))))
+                          "{\"text\":\"reply text\",\"sessionId\":\"s1\"}" 200)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons nil nil))))
       (dsh-bridge-fetch))
     (let ((buf (get-buffer "*dsh-bridge-output*")))
       (should buf)
@@ -437,8 +439,8 @@ current buffer has no session of its own."
         (should (equal (buffer-string) "reply text"))
         (should (eq major-mode 'dsh-bridge-view-mode))
         (should buffer-read-only)
-        (should (string-match-p "reply from: s1"
-                                (format "%s" header-line-format)))))))
+        (should (string-match-p " s1" (format "%s" header-line-format)))
+        (should (string-match-p "· " (format "%s" header-line-format)))))))
 
 (ert-deftest dsh-bridge-fetch-peek-labels-content-session ()
   "A peek/override fetch labels the output buffer with the content's session,
@@ -448,13 +450,34 @@ not the default target."
                (lambda (_method _path _payload callback)
                  (funcall callback nil
                           "{\"text\":\"other reply\",\"sessionId\":\"s2\"}"
-                          200))))
+                          200)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons nil nil))))
       (dsh-bridge-fetch "s2"))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal (buffer-string) "other reply"))
-      (should (string-match-p "reply from: s2"
-                              (format "%s" header-line-format)))
+      (should (string-match-p " s2" (format "%s" header-line-format)))
+      (should-not (string-match-p " s1" (format "%s" header-line-format)))
       (should-not (string-match-p "target:" (format "%s" header-line-format))))))
+
+(ert-deftest dsh-bridge-fetch-seeds-status ()
+  "Fetch seeds the tracker from /output's running flag: true -> running,
+false -> idle.  `dsh-bridge--call' parses JSON `false' as the non-nil symbol
+:false, so the check must compare against t, not truthiness (a regression:
+a `running:false' session used to be seeded `running' and show amber)."
+  (dolist (case (list (cons "{\"text\":\"r\",\"sessionId\":\"s1\",\"running\":true}"
+                            'running)
+                      (cons "{\"text\":\"r\",\"sessionId\":\"s1\",\"running\":false}"
+                            'idle)))
+    (let ((dsh-bridge-default-session "s1")
+          (dsh-bridge--session-status nil))
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_method _path _payload callback)
+                   (funcall callback nil (car case) 200)))
+                ((symbol-function 'dsh-bridge--request)
+                 (lambda (&rest _) (cons nil nil))))
+        (dsh-bridge-fetch "s1"))
+      (should (eq (dsh-bridge--status-state "s1") (cdr case))))))
 
 (ert-deftest dsh-bridge-apply-session-directory ()
   "The helper sets default-directory (trailing slash), with cache fallback."
@@ -477,7 +500,9 @@ not the default target."
                (lambda (_method _path _payload callback)
                  (funcall callback nil
                           "{\"text\":\"reply\",\"sessionId\":\"s1\",\"cwd\":\"/w/sess1\"}"
-                          200))))
+                          200)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons nil nil))))
       (dsh-bridge-fetch))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess1/")))))
@@ -514,9 +539,9 @@ binds the compose keys plus fetch/set-session/list."
     (dsh-bridge-prompt-mode)
     (should (eq major-mode 'dsh-bridge-prompt-mode))
     (should (provided-mode-derived-p major-mode 'text-mode))
-    (should (string-match-p "session" (format "%s" header-line-format))))
+    (should (eq (car-safe header-line-format) :eval)))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-c"))
-              #'dsh-bridge-send))
+              #'dsh-bridge-send-and-exit))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-d"))
               #'dsh-bridge-draft))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-k"))
@@ -539,19 +564,18 @@ binds the compose keys plus fetch/set-session/list."
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
-      (setq header-line-format (dsh-bridge--prompt-header-line))
-      (should (string-match-p "session: T$" (format "%s" header-line-format))))
+      (should (string-match-p " T$" (dsh-bridge--prompt-header-line))))
     (with-temp-buffer
       (let ((dsh-bridge-default-session "s1"))
         (dsh-bridge-prompt-mode)
-        (should (string-match-p "session: T (default)"
-                                (format "%s" header-line-format)))))
+        (should (string-match-p "T (default)"
+                                (dsh-bridge--prompt-header-line)))))
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active nil))
         (dsh-bridge-prompt-mode)
         (should (string-match-p "(last-active)"
-                                (format "%s" header-line-format)))))))
+                                (dsh-bridge--prompt-header-line)))))))
 
 (ert-deftest dsh-bridge-set-buffer-session-binds ()
   "`C-c C-s' rebinds the prompt buffer's session."
@@ -776,10 +800,8 @@ every collected id."
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal (buffer-string) "newest"))
       (should (equal dsh-bridge--view-content-session "s2"))
-      (should (string-match-p "received from: s2"
-                              (format "%s" header-line-format)))
-      (should (string-match-p " · sent "
-                              (format "%s" header-line-format))))))
+      (should (string-match-p "s2 ↓" (format "%s" header-line-format)))
+      (should (string-match-p " ↓ " (format "%s" header-line-format))))))
 
 (ert-deftest dsh-bridge-receive-multiple-messages-message ()
   "Several pending entries produce the honest 'showing the latest' message."
@@ -865,7 +887,7 @@ the anchor at the newest."
         (should (equal (buffer-string) "middle"))
         (should (equal dsh-bridge--view-replies-anchor "newest"))
         (should (equal dsh-bridge--view-replies-index 1))
-        (should (string-match-p " · 2/3" (format "%s" header-line-format)))
+        (should (string-match-p " (2/3)" (format "%s" header-line-format)))
         ;; Older, then at the oldest it stays.
         (dsh-bridge-view-previous-reply)
         (should (equal (buffer-string) "oldest"))
@@ -905,7 +927,9 @@ the anchor at the newest."
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_method _path _payload callback)
                  (funcall callback nil
-                          "{\"text\":\"fresh\",\"sessionId\":\"s1\"}" 200))))
+                          "{\"text\":\"fresh\",\"sessionId\":\"s1\"}" 200)))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (&rest _) (cons nil nil))))
       (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
         (dsh-bridge-view-mode)
         (setq-local dsh-bridge--view-replies-index 2)
@@ -991,7 +1015,7 @@ untouched."
     (should (equal dsh-bridge-default-session "live-1"))))
 
 (ert-deftest dsh-bridge-list-sessions-columns-and-marker ()
-  "The session list shows marker/R/Session/Age/Workspace columns."
+  "The session list shows marker/S/Session/Age/Workspace columns."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
   (let ((dsh-bridge-default-session "live-1"))
@@ -1020,9 +1044,10 @@ untouched."
         (should (eq (get-text-property 0 'face (aref live-cells 0))
                     'dsh-bridge-default-target-face))
         (should (equal (aref saved-cells 0) " "))
-        ;; Running marker (index 1): "…" when running, a space otherwise.
-        (should (equal (aref live-cells 1) "…"))
-        (should (equal (aref saved-cells 1) " "))
+        ;; Status cell (index 1): the state glyph — filled circle for running
+        ;; (amber), `?' for saved (no live agent).
+        (should (equal (aref live-cells 1) "●"))
+        (should (equal (aref saved-cells 1) "?"))
         ;; Session name (index 2): unaltered name, saved face for saved rows.
         (should (equal (aref live-cells 2) "First live"))
         (should (equal (aref saved-cells 2) "A saved one"))
@@ -1118,11 +1143,15 @@ plain."
     (should (dsh-bridge--session-visible-p '((live . nil) (archived . t))))
     (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))))
 
-(ert-deftest dsh-bridge-running-marker ()
-  "The running marker is \"…\" when running, a space otherwise."
-  (should (equal (dsh-bridge--running-marker '((running . t))) "…"))
-  (should (equal (dsh-bridge--running-marker '((running . nil))) " "))
-  (should (equal (dsh-bridge--running-marker '((id . "s"))) " ")))
+(ert-deftest dsh-bridge-status-cell ()
+  "The status cell shows the indicator glyph: filled circle for running and
+idle live sessions, `?' for saved (cold) sessions and for rows with no info."
+  (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . t)))
+                   "●"))
+  (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . nil)))
+                   "●"))
+  (should (string= (dsh-bridge--status-cell '((id . "s1") (live . nil))) "?"))
+  (should (string= (dsh-bridge--status-cell '((id . "s1"))) "?")))
 
 (ert-deftest dsh-bridge-relative-age ()
   "Ages match DSH's buckets (now/min/h/d/mo/y)."
@@ -1624,6 +1653,17 @@ Exit statuses are integers and 1 is truthy, so this guards the `zerop'."
       (dsh-bridge--maybe-check-plugin-version))
     (should dsh-bridge--plugin-version-checked)))
 
+(ert-deftest dsh-bridge-plugin-directory-source-load ()
+  "plugin-directory returns nil-or-a-dir (never signals) off load-path.
+Loading by path from a source checkout makes `locate-library' nil; the helper
+must fall back to the loaded file and never call `file-name-directory' on nil."
+  (cl-letf (((symbol-function 'locate-library) (lambda (&rest _) nil)))
+    (let ((dir (dsh-bridge--plugin-directory)))   ; must not signal
+      (should (or (null dir) (stringp dir))))
+    ;; The bundled-version reader follows the same fallback and is nil-safe.
+    (let ((version (dsh-bridge--bundled-plugin-version)))
+      (should (or (null version) (stringp version))))))
+
 (ert-deftest dsh-bridge-first-load-notice-latched ()
   "The first-load install pointer fires at most once per session."
   (let ((dsh-bridge--first-load-notice-done nil) (msgs 0)
@@ -1715,6 +1755,159 @@ Exit statuses are integers and 1 is truthy, so this guards the `zerop'."
            (parsed (dsh-bridge--sse-parse
                     (decode-coding-string (car decoded) 'utf-8))))
       (should (dsh-bridge--outbox-notice-p (car parsed))))))
+
+;;; Turn notifications, session status, and the header line
+
+(ert-deftest dsh-bridge-status-tracker ()
+  "status-set/seed/drop drive status-state, with an unknown fallback."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil))
+    (should (eq (dsh-bridge--status-state "s1") 'unknown))
+    (dsh-bridge--status-set "s1" 'running)
+    (should (eq (dsh-bridge--status-state "s1") 'running))
+    (dsh-bridge--status-set "s1" 'idle)
+    (should (eq (dsh-bridge--status-state "s1") 'idle))
+    (dsh-bridge--status-drop "s1")
+    (should (eq (dsh-bridge--status-state "s1") 'unknown))
+    ;; Seeding from a /sessions list sets running and drops dead sessions.
+    (dsh-bridge--seed-status '(((id . "a") (running . t))
+                               ((id . "b") (running . nil))))
+    (should (eq (dsh-bridge--status-state "a") 'running))
+    (should (eq (dsh-bridge--status-state "b") 'idle))
+    (should (eq (dsh-bridge--status-state "c") 'unknown))
+    (should (null (assoc "s1" dsh-bridge--session-status)))))
+
+(ert-deftest dsh-bridge-status-unknown-fallback ()
+  "With no tracker and no session row, the status is unknown; the row's
+`running' flag is a seed when the tracker has no opinion."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil))
+    (should (eq (dsh-bridge--status-state "s1") 'unknown)))
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (running . t)))))
+    (should (eq (dsh-bridge--status-state "s1") 'running)))
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (running . nil)))))
+    (should (eq (dsh-bridge--status-state "s1") 'idle))))
+
+(ert-deftest dsh-bridge-status-glyph ()
+  "The status glyph reflects the indicator type and the session state."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge-status-indicator 'geometric))
+    (should (string= (dsh-bridge--status-glyph nil) "?"))
+    (dsh-bridge--status-set "s1" 'idle)
+    (should (string= (dsh-bridge--status-glyph "s1") "●"))
+    (dsh-bridge--status-set "s1" 'running)
+    (should (string= (dsh-bridge--status-glyph "s1") "●")))
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge-status-indicator 'text))
+    (dsh-bridge--status-set "s1" 'idle)
+    (should (string= (dsh-bridge--status-glyph "s1") "·")))
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil)
+        (dsh-bridge-status-indicator 'none))
+    (should (string= (dsh-bridge--status-glyph "s1") ""))))
+
+(ert-deftest dsh-bridge-notification-turn-events ()
+  "The notification dispatch updates the tracker for start/complete frames."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache nil))
+    (dsh-bridge--notification-handle-events
+     '(((kind . "turn-start") (sessionId . "s1"))))
+    (should (eq (dsh-bridge--status-state "s1") 'running))
+    (dsh-bridge--notification-handle-events
+     '(((kind . "turn-complete") (sessionId . "s1") (reason . "completed"))))
+    (should (eq (dsh-bridge--status-state "s1") 'idle))))
+
+(ert-deftest dsh-bridge-view-position ()
+  "The view position is newest-first (k/n), at rest and while cycling."
+  (let ((dsh-bridge--replies-cache '(("s1" "newest" "middle" "oldest"))))
+    (with-temp-buffer
+      (insert "middle")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-replies-index nil)
+      (should (equal (dsh-bridge--view-reply-position) " (2/3)"))
+      (setq-local dsh-bridge--view-replies-index 0)
+      (should (equal (dsh-bridge--view-reply-position) " (1/3)"))
+      (setq-local dsh-bridge--view-replies-index 2)
+      (should (equal (dsh-bridge--view-reply-position) " (3/3)"))
+      ;; Unknown text at rest omits the indicator.
+      (setq-local dsh-bridge--view-replies-index nil)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "opaque"))
+      (should (equal (dsh-bridge--view-reply-position) "")))))
+
+(ert-deftest dsh-bridge-view-header-provenance ()
+  "The output header uses `↓' for pushed messages and `·' for fetches."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge-status-indicator 'geometric))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-timestamp "14:22:05")
+      (setq-local dsh-bridge--view-received-at nil)
+      (should (string-match-p "· 14:22:05" (dsh-bridge--view-header-line)))
+      (should-not (string-match-p "↓" (dsh-bridge--view-header-line)))
+      (setq-local dsh-bridge--view-received-at 2000000)
+      (should (string-match-p "↓ " (dsh-bridge--view-header-line)))
+      (should-not (string-match-p "· " (dsh-bridge--view-header-line))))))
+
+(ert-deftest dsh-bridge-prompt-sent-marker ()
+  "The prompt header's `✓ sent' marker appears after a send and clears on edit."
+  (let ((dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0)))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (erase-buffer)
+      (insert "hello")
+      (should (string-match-p "sent" (dsh-bridge--prompt-sent-marker "s1")))
+      (erase-buffer)
+      (insert "hello!")
+      (should (equal (dsh-bridge--prompt-sent-marker "s1") "")))))
+
+(ert-deftest dsh-bridge-resend-guard ()
+  "The resend guard fires only for an identical re-send to the same session."
+  (let ((dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0)))))
+    (should (dsh-bridge--resend-guard-p "s1" "hello"))
+    (should-not (dsh-bridge--resend-guard-p "s1" "hello!"))
+    (should-not (dsh-bridge--resend-guard-p "s2" "hello"))
+    (should-not (dsh-bridge--resend-guard-p nil "hello"))))
+
+(ert-deftest dsh-bridge-turn-reason-phrase ()
+  "The turn-end reason kind maps to a truthful human verb."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
+    (should (equal (dsh-bridge--turn-reason-phrase "s1" "completed")
+                   "session T finished"))
+    (should (equal (dsh-bridge--turn-reason-phrase "s1" "aborted")
+                   "session T interrupted"))
+    (should (equal (dsh-bridge--turn-reason-phrase "s1" "error")
+                   "session T failed"))
+    (should (equal (dsh-bridge--turn-reason-phrase "s1" "max-tokens")
+                   "session T stopped at the token limit"))
+    (should (equal (dsh-bridge--turn-reason-phrase "s1" "blocked")
+                   "session T blocked"))
+    (should (equal (dsh-bridge--turn-reason-phrase "s1" "bogus")
+                   "session T ended"))))
+
+(ert-deftest dsh-bridge-send-exit-buries ()
+  "The send-and-exit success branch buries the prompt buffer (no output shown)."
+  (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+    (kill-buffer "*dsh-bridge-output*"))
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (setq-local dsh-bridge--prompt-session "s1")
+    (let ((buried nil))
+      (cl-letf (((symbol-function 'bury-buffer) (lambda (&rest _) (setq buried t)))
+                ((symbol-function 'switch-to-buffer) (lambda (&rest _) nil)))
+        (dsh-bridge--prompt-exit "s1" "T"))
+      (should buried))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

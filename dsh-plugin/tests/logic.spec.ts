@@ -17,6 +17,8 @@ import {
   sessionTitle,
   tokenRequestsSameOrigin,
   tokensEqual,
+  turnCompleteMessage,
+  turnStartMessage,
   userPrompts,
   workspaceTitlesBySession,
   type LiveSessionLike,
@@ -390,5 +392,21 @@ describe('draftMessage', () => {
 describe('outboxMessage', () => {
   it('emits one SSE data frame signalling new outbox entries', () => {
     expect(outboxMessage()).toBe('data: {"kind":"outbox"}\n\n')
+  })
+})
+
+describe('turnStartMessage', () => {
+  it('emits one SSE data frame carrying only the session id', () => {
+    expect(turnStartMessage('session-1')).toBe(
+      'data: {"kind":"turn-start","sessionId":"session-1"}\n\n',
+    )
+  })
+})
+
+describe('turnCompleteMessage', () => {
+  it('emits one SSE data frame carrying the turn-end reason kind', () => {
+    expect(turnCompleteMessage('session-1', 'completed')).toBe(
+      'data: {"kind":"turn-complete","sessionId":"session-1","reason":"completed"}\n\n',
+    )
   })
 })

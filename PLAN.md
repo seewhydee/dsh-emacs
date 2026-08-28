@@ -116,11 +116,16 @@ ERT for the Elisp helpers (`emacs --batch`).
 
 In suggested order:
 
-1. **Turn-completion notifications.** The SSE plumbing exists on both ends.
-   Host: subscribe `ctx.on('session/event')`, emit `{ kind: "turn-complete",
-   sessionId }` at turn/step boundaries (no text on the wire). Emacs: on
-   notice for the view buffer's session, refetch the latest reply (or just
-   message).
+1. **Turn-completion notifications (implemented).** The host subscribes
+   `ctx.on('session/event')` and emits `{ kind: "turn-start" | "turn-complete",
+   sessionId, reason? }` frames on the SSE stream (non-subagent sessions
+   only); `/output` and `/replies` now report `running`. Emacs tracks the live
+   status (`dsh-bridge--session-status`), re-renders the matching buffer header
+   and the sessions-list row, and on turn-complete refetches the shown reply
+   (non-popping) or echoes a reason-phrased line per
+   `dsh-bridge-turn-complete`. This also rewired the header lines
+   (`<status> <label>[ ↓ <time>] (k/n)`, the prompt's `(:eval)` header with
+   `✓ sent HH:MM`, and the sessions-list `…` column). See `dsh-turns-plan.md`.
 2. **Resume saved sessions.** The session list already shows persisted
    sessions, but they are inert. Use `ctx.agents.resume()` (pattern:
    `ensureSession` in `packages/host/apiproxy/src/api-proxy.ts`) so selecting
@@ -161,7 +166,8 @@ indicator) are parked pending a decision on what the web UI side should grow.
   Emacs-as-primary-client.
 - Bridge-owned sessions via `ctx.agents.create()` with their own model/preset.
 - Full live tail of assistant text into Emacs (rejected — that is DSH's job;
-  see the README). Turn-completion notices (next step 1) are the substitute.
+  see the README). Turn-completion notices (now implemented) are the
+  substitute.
 - `emacsclient` push for text transfer (pull won; push may still be wanted for
   the edit flow's file-opens).
 - Binding the route beyond loopback (would need real auth, TLS, origin checks).

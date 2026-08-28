@@ -369,3 +369,23 @@ export function draftMessage(sessionId: string, text: string): string {
 export function outboxMessage(): string {
   return 'data: {"kind":"outbox"}\n\n'
 }
+
+/**
+ * One SSE `data:` frame announcing that a session's agent started a turn.
+ * Carries the session id so the Emacs status tracker can flip that session to
+ * running; the browser ignores the non-`draft` kind.
+ */
+export function turnStartMessage(sessionId: string): string {
+  return `data: ${JSON.stringify({ kind: 'turn-start', sessionId })}\n\n`
+}
+
+/**
+ * One SSE `data:` frame announcing that a session's turn ended. REASON is the
+ * turn-end reason kind (`completed` / `aborted` / `blocked` / `error` /
+ * `max-tokens`; `interrupted` is only written by persistence repair, never
+ * emitted live), so the Emacs `message` variant can phrase a failed turn
+ * without echoing "finished". The glyph returns to idle regardless of reason.
+ */
+export function turnCompleteMessage(sessionId: string, reason: string): string {
+  return `data: ${JSON.stringify({ kind: 'turn-complete', sessionId, reason })}\n\n`
+}

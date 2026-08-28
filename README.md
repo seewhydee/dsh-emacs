@@ -133,7 +133,10 @@ The following commands are available from the transient menu:
 
 The `M-x dsh-bridge-list-sessions` command opens a buffer with a list
 of DSH sessions.  The default target session (if any) is marked by a
-`*` in the leftmost column.
+`*` in the leftmost column, and the `S` (state) column shows each
+session's live status — a filled circle that is green when idle and
+amber when running, `?` when unknown — obeying
+`dsh-bridge-status-indicator`.
 
 The following commands are available from the DSH-Sessions buffer:
 
@@ -154,8 +157,10 @@ are also available.
 This read-only buffer contains the model output for a DSH session.  It
 is fetched by `f` from the transient menu or the DSH-Sessions buffer,
 `C-c C-f` from the DSH-Prompt buffer, or pushed from the web UI's
-"Send to Emacs" button (see below).  The session is displayed on the
-header line.
+"Send to Emacs" button (see below).  The header line shows the session's
+status glyph (`●` filled green when idle, `●` amber when running, `?` unknown), a `↓`-marked time
+when the reply was pushed (vs `· <time>` for a fetch), and the reply's
+newest-first position `(k/n)`.
 
 The following commands are available:
 
@@ -180,7 +185,12 @@ DSH-View buffer opens a prompt for the same session.
 
 The following commands are available from the DSH-Prompt buffer:
 
-* `C-c C-c` — send the region, or the whole buffer, as a prompt.
+* `C-c C-c` — send the region, or the whole buffer, as a prompt and, on
+  success, bury the buffer (the text survives, unmodified, for
+  edit-and-resubmit).  The prompt buffer's header shows the session's
+  status glyph and a `✓ sent HH:MM` marker when the current text was just
+  sent; with `dsh-bridge-prompt-resend-confirm` (the default) an identical
+  re-send first asks for confirmation.
 * `C-c C-d` — push it to the DSH composer as a draft instead.
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
