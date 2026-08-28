@@ -128,25 +128,36 @@ export interface SessionRow {
   createdAt: number
   /** Display name of the workspace the session belongs to, when one is known. */
   workspace?: string | null
+  /** Id of the workspace the session belongs to, when one is known. */
+  workspaceId?: string | null
   /** Whether the workspace registry hides the session from grouping surfaces. */
   archived?: boolean
 }
 
-/** Minimal structural face of one workspace, enough for a session->title map. */
-export interface WorkspaceLike {
+/** The workspace reference a session row displays and targets. */
+export interface WorkspaceRef {
+  id: string
   title: string
+}
+
+/** Minimal structural face of one workspace, enough for a session->ref map. */
+export interface WorkspaceLike {
+  id: string
+  title: string
+  path: string
   sessionIds: readonly string[]
 }
 
 /**
- * Build a session-id -> workspace-title map from the registry's workspaces.
- * A session accounted by several workspaces keeps the last one's title (the
- * registry invariant forbids that overlap in practice).
+ * Build a session-id -> workspace-ref map from the registry's workspaces.
+ * A session accounted by several workspaces keeps the last one's ref (the
+ * registry invariant forbids that overlap in practice). The ref carries both
+ * the display title and the id, so a row can name the workspace for rename.
  */
-export function workspaceTitlesBySession(workspaces: readonly WorkspaceLike[]): Map<string, string> {
-  const map = new Map<string, string>()
+export function workspaceRefsBySession(workspaces: readonly WorkspaceLike[]): Map<string, WorkspaceRef> {
+  const map = new Map<string, WorkspaceRef>()
   for (const workspace of workspaces) {
-    for (const id of workspace.sessionIds) map.set(id, workspace.title)
+    for (const id of workspace.sessionIds) map.set(id, { id: workspace.id, title: workspace.title })
   }
   return map
 }
@@ -218,28 +229,61 @@ export function mergeSessionRows(
  */
 export type ResolveTargetResult =
   | { kind: 'target'; id: string }
+  | { kind: 'cold'; id: string }
   | { kind: 'error'; status: 404 | 409; message: string }
+
+/** The classification of one session id against a targetable inventory. */
+export type SessionClass = 'live' | 'cold' | 'unknown'
+
+/**
+ * Classify a session id against a live id set and a persisted id set.
+ * A subagent-produced persisted id is still `cold` for classification (the
+ * caller's resume guard rejects ownership at the header boundary); this helper
+ * only says which tier holds the id, so the wiring can route the resume arm.
+ */
+export function classifySessionId(
+  id: string,
+  liveIds: ReadonlySet<string>,
+  persistedIds: ReadonlySet<string>,
+): SessionClass {
+  if (liveIds.has(id)) return 'live'
+  if (persistedIds.has(id)) return 'cold'
+  return 'unknown'
+}
 
 /**
  * Resolve the effective target session id. Precedence: an explicit id, then
- * last-active. There is no host-side pin (see the UX plan, Section 3.2): a nil
- * explicit id always means the host's own most-recently-active live session,
- * so "last-active" has exactly one meaning and no second store can shadow it.
- * A non-live explicit id is 404; a live session with no live agent is 409; no
- * targetable session at all is 409. `hasAgent` is supplied by the caller (it
- * consults the live agent registry).
+ * last-active, then (when nothing is live) the most recent cold session.
+ *
+ * An explicit id that is live and agent-bearing is a `target`; a live id with
+ * no agent is 409; an id that is persisted but not live is `cold` (the wiring
+ * resumes it); an id neither live nor persisted is 404. With no explicit id,
+ * the most recently active live session wins as before; when nothing is live
+ * and agent-bearing, the most recent cold session (by `createdAt`, excluding
+ * subagent origin) is returned as `cold` so the wiring resumes it — matching
+ * the web UI's invisible-resume model after a `dsh web` restart. No id in
+ * either tier is 409. `hasAgent` is supplied by the caller (it consults the
+ * live agent registry).
  */
 export function resolveTargetId(
   explicitId: string | undefined,
   live: readonly LiveSessionLike[],
+  persisted: readonly SessionHeaderLike[],
   hasAgent: (id: string) => boolean,
 ): ResolveTargetResult {
-  const find = (id: string): LiveSessionLike | undefined => live.find(session => session.id === id)
+  // The explicit-id classification keeps subagent-origin ids so the resume arm
+  // (and its ownership guard) can answer 409 for them; only the bare fallback,
+  // which must never target a subagent on its own, skips that origin.
+  const liveIds = new Set(live.map(session => session.id))
+  const persistedIds = new Set(persisted.map(header => header.id))
   if (explicitId !== undefined) {
-    const session = find(explicitId)
-    if (session === undefined) return { kind: 'error', status: 404, message: `session ${explicitId} is not live` }
-    if (!hasAgent(session.id)) return { kind: 'error', status: 409, message: `session ${explicitId} has no live agent` }
-    return { kind: 'target', id: session.id }
+    const cls = classifySessionId(explicitId, liveIds, persistedIds)
+    if (cls === 'live') {
+      if (!hasAgent(explicitId)) return { kind: 'error', status: 409, message: `session ${explicitId} has no live agent` }
+      return { kind: 'target', id: explicitId }
+    }
+    if (cls === 'cold') return { kind: 'cold', id: explicitId }
+    return { kind: 'error', status: 404, message: `session ${explicitId} is not live` }
   }
   let best: string | undefined
   let bestTime = -Infinity
@@ -251,8 +295,18 @@ export function resolveTargetId(
       best = session.id
     }
   }
-  if (best === undefined) return { kind: 'error', status: 409, message: 'no active session' }
-  return { kind: 'target', id: best }
+  if (best !== undefined) return { kind: 'target', id: best }
+  let bestCold: string | undefined
+  let bestCreated = -Infinity
+  for (const header of persisted) {
+    if (header.origin === 'subagent') continue
+    if (header.createdAt > bestCreated) {
+      bestCreated = header.createdAt
+      bestCold = header.id
+    }
+  }
+  if (bestCold !== undefined) return { kind: 'cold', id: bestCold }
+  return { kind: 'error', status: 409, message: 'no active session' }
 }
 
 /** The bearer token carried by an Authorization header, or undefined. */
@@ -388,4 +442,32 @@ export function turnStartMessage(sessionId: string): string {
  */
 export function turnCompleteMessage(sessionId: string, reason: string): string {
   return `data: ${JSON.stringify({ kind: 'turn-complete', sessionId, reason })}\n\n`
+}
+
+/**
+ * Whether renaming a workspace to TITLE would collide with an existing
+ * workspace (any other workspace already bearing that title). A same-title
+ * rename is NOT a conflict — the caller treats it as a no-op — so the named
+ * workspace is excluded by id. Mirrors the gateway's uniqueness check.
+ */
+export function workspaceTitleConflict(
+  title: string,
+  workspaces: readonly WorkspaceLike[],
+  excludeWorkspaceId?: string,
+): boolean {
+  return workspaces.some(other => other.id !== excludeWorkspaceId && other.title === title)
+}
+
+/**
+ * One SSE `data:` frame announcing that the session/workspace inventory changed
+ * (a session was created, disposed, renamed, resumed, archived, or a workspace
+ * was created/renamed/attached). The optional SESSION-ID lets Emacs preserve
+ * point across a list refresh; absent, the consumer just refetches. The browser
+ * ignores the non-`draft` kind, so this is backward-compatible.
+ */
+export function sessionsChangedMessage(sessionId?: string): string {
+  const payload = sessionId === undefined
+    ? { kind: 'sessions-changed' }
+    : { kind: 'sessions-changed', sessionId }
+  return `data: ${JSON.stringify(payload)}\n\n`
 }

@@ -44,8 +44,9 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
 - Auth: shared bearer token at `$DSH_HOME/dsh-bridge-token` (generated on
   first use, mode 0600), required on every route except the two above.
 - Targeting: no host-side pin. A request without `sessionId` resolves to the
-  last-active live session; explicit overrides must be live, non-subagent
-  sessions with a live agent (404/409 otherwise). Live-only: no resume yet.
+  last-active live session, falling back to resuming the most recent cold
+  session; explicit ids may name live or saved sessions — a saved id resumes
+  on demand (404 unknown, 409 subagent-owned).
 
 **Client plugin** (`dsh-plugin/src/client/`, `dsh.client` browser bundle):
 
@@ -59,8 +60,9 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
 **Emacs package** (`emacs/dsh-bridge.el`):
 
 - `M-x dsh-bridge` transient dispatcher; `dsh-bridge-list-sessions` tabulated
-  session list (live / live+saved / live+saved+archived cycling, default-target
-  marker, peek/describe/copy-id).
+  session list (live + saved rows, archived-visibility toggle, default-target
+  marker, open/set-target with on-demand resume, rename/archive/create/
+  workspace-rename, peek/describe/copy-id).
 - `dsh-bridge-view-mode`: read-only reply buffer with GFM font-lock (when
   markdown-mode is installed), `M-p`/`M-n` reply navigation, copy, refetch.
 - `dsh-bridge-prompt-mode`: markdown-derived composition buffer with prompt
@@ -92,6 +94,30 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
 
 **Tests:** Vitest for the plugin's pure logic (`pnpm test` in `dsh-plugin/`);
 ERT for the Elisp helpers (`emacs --batch`).
+
+**Session handling (resume, rename, archive, create; fork excluded) — see
+`session-handling-plan.md`:**
+
+- Saved (cold, persisted-only) sessions are first-class. Targeting or
+  selecting one resumes it via `ctx.agents.resume()` (shared `composeBridgeAgent`
+  selection-install-then-preset-mount helper, with an in-flight dedupe map
+  mirroring the gateway's `agentFor`); regained/built agents are not
+  plugin-tracked, so a config hot-reload does not kill them. Resume is
+  implicit: an explicit cold id resumes on demand, and an untargeted request
+  falls back to the most recent cold session when nothing is live. Subagent
+  ownership is re-checked at the header boundary (409).
+- New routes: `POST /sessions/resume`, `POST /sessions/rename`
+  (`ctx.sessionTitle.rename`), `POST /sessions/archive`
+  (`ctx.workspaceRegistry.archiveSession` — one-way), `POST /sessions/create`
+  (optionally in a new workspace, `ctx.agents.create` +
+  `workspace.attachSession`), `GET /workspaces`, and `POST /workspaces/rename`
+  (uniqueness check via a pure `workspaceTitleConflict` helper).
+- SSE `sessions-changed` frame on session/workspace inventory changes;
+  `SessionRow` gains `workspaceId`. The "saved" label is retired from the Emacs
+  UI (internal-only): the display cycle collapses to an archived-visibility
+  toggle, and saved sessions are targetable. New session-list keys: `R` rename,
+  `d` archive, `+` create, `W` rename-workspace; the list auto-refreshes on
+  `sessions-changed`.
 
 ## Build & mount
 
@@ -126,11 +152,23 @@ In suggested order:
    `dsh-bridge-turn-complete`. This also rewired the header lines
    (`<status> <label>[ ↓ <time>] (k/n)`, the prompt's `(:eval)` header with
    `✓ sent HH:MM`, and the sessions-list `…` column). See `dsh-turns-plan.md`.
-2. **Resume saved sessions.** The session list already shows persisted
-   sessions, but they are inert. Use `ctx.agents.resume()` (pattern:
-   `ensureSession` in `packages/host/apiproxy/src/api-proxy.ts`) so selecting
-   or targeting a saved session makes it live; then fetch/prompt buffers can
-   work on it. Likely the biggest functional gap.
+2. **Session handling: resume, rename, archive, create (fork excluded) (implemented).**
+   Broadened from "resume saved sessions". Make saved (cold, persisted-only)
+   sessions first-class: targeting or selecting one resumes it via
+   `ctx.agents.resume()` (pattern: `ensureSession` in
+   `packages/host/apiproxy/src/api-proxy.ts`), after which fetch/prompt
+   buffers work on it. Plus the web-UI session/workspace operations that have
+   clean service seams: rename session (`ctx.sessionTitle.rename`), archive
+   session (`ctx.workspaceRegistry.archiveSession` — one-way: no unarchive
+   exists at any layer), create session (optionally in a new workspace), and
+   rename workspace (`Workspace.setTitle`). Fork is excluded: the cold-source
+   fork logic (turn-boundary cut, seed/meta assembly, preset re-composition,
+   workspace inheritance) is inlined in the gateway's `session.fork` handler
+   with no service seam to reuse. Resume is implicit, web-UI style: an
+   explicit cold target resumes on demand, and an untargeted request falls
+   back to the most recent cold session when nothing is live — so the
+   "saved" label is retired from the Emacs UI (internal-only). See
+   `session-handling-plan.md`.
 3. **`/emacs edit` flow.** Host: register `/emacs` via
    `ctx.commands.register()` plus `POST /dsh-bridge/open { path, line? }`,
    both shelling out to `emacsclient` (spawn template:

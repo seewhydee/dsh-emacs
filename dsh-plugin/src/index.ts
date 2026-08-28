@@ -31,19 +31,29 @@
 //   POST /dsh-bridge/outbox { text, sessionId, source? } -> deposit an entry
 //        (sessionId required: every entry is session-scoped)
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
+//   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
+//   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
+//   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
+//   POST /dsh-bridge/sessions/create { workspaceId | path, workspaceTitle? }
+//        -> create a session in a workspace (exactly one of the two keys)
+//   GET  /dsh-bridge/workspaces                   -> workspace roster
+//   POST /dsh-bridge/workspaces/rename { workspaceId, title } -> rename a workspace
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import { resolveSessionPreset } from '@deepseek-ai/dsh-agent-presets'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { Outbox } from './outbox.ts'
 import {
   assistantReplies,
+  classifySessionId,
   draftMessage,
   isLoopbackAddress,
   isSubagentChild,
@@ -55,12 +65,14 @@ import {
   parseBearerAuthorization,
   resolveTargetId,
   sessionTitle,
+  sessionsChangedMessage,
   tokenRequestsSameOrigin,
   tokensEqual,
   turnCompleteMessage,
   turnStartMessage,
   userPrompts,
-  workspaceTitlesBySession,
+  workspaceRefsBySession,
+  workspaceTitleConflict,
   type LiveSessionLike,
   type ResolveTargetResult,
   type SessionEventLike,
@@ -90,7 +102,7 @@ interface SessionService {
 /** Minimal face of the `sessionPersistence` service: list + inspect materialized sessions. */
 interface SessionPersistenceService {
   list(signal?: AbortSignal): Promise<SessionHeader[]>
-  inspect(id: string, signal?: AbortSignal): Promise<{ events: readonly SessionEventLike[] }>
+  inspect(id: string, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: readonly SessionEventLike[] }>
 }
 
 /** Minimal face of one persisted projection-cache snapshot. */
@@ -116,6 +128,60 @@ interface ProjectionCacheService {
 interface WorkspaceRegistryService {
   list(): WorkspaceLike[]
   archivedSessionIds: readonly string[]
+  get(id: string): WorkspaceEntityService | undefined
+  create(path: string, title?: string): Promise<WorkspaceEntityService>
+  resolveByPath(path: string): Promise<WorkspaceEntityService | undefined>
+  archiveSession(id: string): Promise<void>
+}
+
+/** Minimal face of one workspace entity, enough for display and rename. */
+interface WorkspaceEntityService {
+  id: string
+  path: string
+  title: string
+  setTitle(title: string): Promise<void>
+  attachSession(id: string): Promise<void>
+}
+
+/** Minimal face of the optional `agentDefaultModel` service (a static snapshot). */
+interface AgentDefaultModelService {
+  currentSelection(): ModelSelection
+}
+
+/** Minimal face of the optional `agentPresets` service (composition roster). */
+interface AgentPresetsService {
+  resolve(id?: string): Promise<{ id: string }>
+  mount(agentCtx: Context, id?: string): Promise<unknown>
+}
+
+/** Minimal face of the optional `sessionTitle` service (explicit user rename). */
+interface SessionTitleService {
+  rename(session: Session, title: string): { title: string }
+}
+
+/** A bridge-scoped error carrying the HTTP status Emacs maps to. */
+class BridgeError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message)
+    this.name = 'BridgeError'
+  }
+}
+
+/** Whether an error is the session-title service's invalid-title rejection. */
+function isSessionTitleInvalidError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'SessionTitleInvalidError'
+}
+
+/** Whether an error is the workspace registry's unknown-session rejection. */
+function isWorkspaceUnknownSessionError(error: unknown): error is Error {
+  return error instanceof Error && error.name === 'WorkspaceUnknownSessionError'
+}
+
+/** The HTTP status for a propagated bridge/transport error: BridgeError → its status, an oversize body → 413, else 500. */
+function bridgeErrorStatus(error: unknown): number {
+  if (error instanceof BridgeError) return error.status
+  if (error instanceof PayloadTooLargeError) return 413
+  return 500
 }
 
 /** The target of a bridge operation: a live session plus its live agent. */
@@ -251,11 +317,6 @@ export function apply(ctx: Context): void {
     return session !== undefined && ctx.agents.get(session.id) !== undefined
   }
 
-  /** Whether an id is a drivable target (live, non-subagent, with an agent). */
-  function isLiveTarget(id: string): boolean {
-    return targetableSessions().some(session => session.id === id) && hasAgent(id)
-  }
-
   /** Resolve a resolved target id back to its live session + agent. */
   function targetById(id: string): BridgeTarget | undefined {
     const session = sessions.list().find(s => String(s.id) === id)
@@ -264,25 +325,205 @@ export function apply(ctx: Context): void {
     return agent === undefined ? undefined : { session, agent }
   }
 
-  /** Resolve a request's effective target via the pure precedence logic. */
-  function resolveTarget(explicitId: string | undefined): ResolveTargetResult {
-    return resolveTargetId(explicitId, targetableSessions(), hasAgent)
+  /**
+   * List persisted session headers as lightweight rows for the pure targeting
+   * logic: only classification fields (id, createdAt, origin) are needed, so
+   * this skips the per-header title fold that `/sessions` pays. A persistence
+   * backend failure yields no cold rows — targeting degrades to live-only.
+   */
+  async function persistedHeaders(): Promise<SessionHeaderLike[]> {
+    try {
+      const headers = await sessionPersistence.list()
+      return headers.map(header => ({
+        id: String(header.id),
+        cwd: header.cwd,
+        createdAt: header.createdAt,
+        origin: header.origin,
+      }))
+    } catch {
+      return []
+    }
   }
 
-  // Push turn lifecycle onto the SSE stream for the Emacs status tracker.
-  // Emitted only for targetable (non-subagent) sessions; the browser client
-  // ignores any kind it does not recognise, so this is backward-compatible.
+  /**
+   * Compose an agent for resume/create: the static model-selection snapshot
+   * (the gateway re-reads a three-tier getter; the bridge accepts the simpler
+   * snapshot), then selection-install-then-preset-mount, matching the gateway's
+   * `composeAgent` ordering. For a resumed cold session the preset is resolved
+   * from its log; for a created session it is the deployment default.
+   */
+  async function composeBridgeAgent(presetId: string | undefined): Promise<{
+    agentOptions: AgentOptions
+    agentPreset?: string
+    setup: (agentCtx: Context) => Promise<void>
+  }> {
+    const selection = (ctx.get('agentDefaultModel') as AgentDefaultModelService | undefined)?.currentSelection()
+    if (selection === undefined) {
+      throw new BridgeError(501, 'profile lacks an agent default model; cannot compose an agent')
+    }
+    const ref: ModelSelectionRef = { current: selection, assembled: undefined }
+    const agentOptions: AgentOptions = { provider: selection.provider, model: selection.model }
+    const presets = ctx.get('agentPresets') as AgentPresetsService | undefined
+    if (presets === undefined) {
+      return {
+        agentOptions,
+        setup: (agentCtx: Context) => {
+          installModelSelection(agentCtx, ref)
+          return Promise.resolve()
+        },
+      }
+    }
+    const resolvedId = (await presets.resolve(presetId)).id
+    return {
+      agentOptions,
+      agentPreset: resolvedId,
+      setup: async (agentCtx: Context) => {
+        installModelSelection(agentCtx, ref)
+        await presets.mount(agentCtx, resolvedId)
+      },
+    }
+  }
+
+  /** In-flight resume/create per session id, deduplicating concurrent requests. */
+  const sessionCreations = new Map<string, Promise<Agent>>()
+
+  /** Whether a persisted or live header marks a session subagent-owned. */
+  function subagentOwnedHeader(header: { origin?: string } | undefined): boolean {
+    return header?.origin === 'subagent'
+  }
+
+  /**
+   * Ensure target id is live: adopt an already-live agent, else resume the
+   * persisted session. Subagent-owned ids are rejected (409). The agent handle
+   * is deliberately dropped after publication — the agent belongs to the host,
+   * so a config hot-reload must not kill live bridge sessions.
+   * @throws {BridgeError} 404 unknown id, 409 subagent-owned, 500 composition failure.
+   */
+  async function ensureLive(id: string): Promise<BridgeTarget> {
+    let op = sessionCreations.get(id)
+    if (op === undefined) {
+      op = (async () => {
+        const live = ctx.agents.get(id as SessionId)
+        if (live !== undefined) {
+          // Adopting a live agent needs the same ownership guard as the cold
+          // arm: a live subagent child is as off-limits as a persisted one.
+          const session = sessions.list().find(s => String(s.id) === id)
+          if (session !== undefined
+            && isSubagentChild(session.header.origin, ownedByLiveParent(session))) {
+            throw new BridgeError(409, `session ${id} is owned by a subagent`)
+          }
+          return live
+        }
+        const header = (await sessionPersistence.list()).find(h => String(h.id) === id)
+        if (header === undefined) throw new BridgeError(404, `session ${id} is not live`)
+        if (subagentOwnedHeader(header)) {
+          throw new BridgeError(409, `session ${id} is owned by a subagent`)
+        }
+        const inspected = await sessionPersistence.inspect(id)
+        if (subagentOwnedHeader(inspected.meta)) {
+          throw new BridgeError(409, `session ${id} is owned by a subagent`)
+        }
+        const presetId = resolveSessionPreset({ header: inspected.meta, events: inspected.events })
+        const composition = await composeBridgeAgent(presetId)
+        const handle = await ctx.agents.resume({
+          resumeSessionId: id as SessionId,
+          agentOptions: composition.agentOptions,
+          setup: composition.setup,
+        })
+        return handle.agent
+      })().catch((error: unknown) => {
+        // A concurrent Host path may have published the same identity while we
+        // crossed an await; adopt it rather than propagating a false conflict.
+        // Our own BridgeErrors (404 unknown, 409 subagent-owned) are deliberate
+        // verdicts — adopting past them would resurrect the subagent bypass.
+        if (!(error instanceof BridgeError)) {
+          const live = ctx.agents.get(id as SessionId)
+          if (live !== undefined) return live
+        }
+        throw error
+      }).finally(() => { sessionCreations.delete(id) })
+      sessionCreations.set(id, op)
+    }
+    const agent = await op
+    const target = targetById(String(agent.id))
+    if (target === undefined) throw new BridgeError(500, `session ${id} published but is not targetable`)
+    return target
+  }
+
+  /**
+   * Resolve a request's effective target, resuming a cold session on demand.
+   * A cold result routes through `ensureLive` so an explicit cold id or the
+   * bare most-recent-cold fallback both resume before the route proceeds.
+   * An explicit id that is already live and agent-bearing is adopted directly,
+   * without the persisted-header round-trip the full classification pays.
+   * @throws {BridgeError} 404 unknown, 409 no active/subagent, 500 composition.
+   */
+  async function resolveTarget(explicitId: string | undefined): Promise<BridgeTarget> {
+    const live = targetableSessions()
+    if (explicitId !== undefined
+      && classifySessionId(explicitId, new Set(live.map(session => session.id)), new Set<string>()) === 'live'
+      && hasAgent(explicitId)) {
+      const target = targetById(explicitId)
+      if (target !== undefined) return target
+    }
+    const result: ResolveTargetResult = resolveTargetId(
+      explicitId,
+      live,
+      await persistedHeaders(),
+      hasAgent,
+    )
+    if (result.kind === 'error') throw new BridgeError(result.status, result.message)
+    if (result.kind === 'target') {
+      const target = targetById(result.id)
+      if (target === undefined) throw new BridgeError(409, 'no active session')
+      return target
+    }
+    return ensureLive(result.id)
+  }
+
+  /** Broadcast a `sessions-changed` frame, optionally naming the changed id. */
+  function broadcastSessionsChanged(sessionId?: string): void {
+    broadcast(sessionsChangedMessage(sessionId))
+  }
+
+  // Push turn lifecycle and title changes onto the SSE stream for the Emacs
+  // status tracker and sessions-list auto-refresh. Emitted only for targetable
+  // (non-subagent) sessions; the browser ignores any kind it does not
+  // recognise, so this is backward-compatible.
   ctx.on('session/event', (session, event) => {
-    if (event.type !== 'turn/start' && event.type !== 'turn/end') return
     if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
     const id = String(session.id)
     if (event.type === 'turn/start') {
       broadcast(turnStartMessage(id))
-    } else {
+      return
+    }
+    if (event.type === 'turn/end') {
       const data = event.data as { reason?: unknown } | undefined
       const reason = data?.reason as { kind?: unknown } | undefined
       broadcast(turnCompleteMessage(id, typeof reason?.kind === 'string' ? reason.kind : 'unrecognized'))
+      return
     }
+    if (event.type === 'session/title') {
+      broadcast(sessionsChangedMessage(id))
+    }
+  })
+
+  // Announce inventory changes: create/dispose and workspace domain mutations
+  // (archive set, workspace create/rename/attach) all shift what `/sessions`
+  // returns, so Emacs refreshes its list. Workspace domain events are chatty
+  // (one per write); the Emacs consumer debounces, so a plain frame suffices.
+  ctx.on('session/created', (session) => {
+    if (!isSubagentChild(session.header.origin, ownedByLiveParent(session))) {
+      broadcastSessionsChanged(String(session.id))
+    }
+  })
+  ctx.on('session/disposed', (session) => {
+    if (!isSubagentChild(session.header.origin, ownedByLiveParent(session))) {
+      broadcastSessionsChanged(String(session.id))
+    }
+  })
+  ctx.on('domain/changed', (change) => {
+    if (change.domain === 'workspace') broadcastSessionsChanged()
   })
 
   /**
@@ -332,11 +573,12 @@ export function apply(ctx: Context): void {
     }
     const rows = mergeSessionRows(targetableSessions(), persisted)
     const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
-    const workspaceBySession = workspaceTitlesBySession(workspaceRegistry?.list() ?? [])
+    const workspaceBySession = workspaceRefsBySession(workspaceRegistry?.list() ?? [])
     const archivedIds = new Set((workspaceRegistry?.archivedSessionIds ?? []).map(id => String(id)))
     return rows.map(row => ({
       ...row,
-      workspace: workspaceBySession.get(row.id) ?? null,
+      workspace: workspaceBySession.get(row.id)?.title ?? null,
+      workspaceId: workspaceBySession.get(row.id)?.id ?? null,
       archived: archivedIds.has(row.id),
     }))
   }
@@ -433,26 +675,20 @@ export function apply(ctx: Context): void {
             }
             explicitId = body.sessionId
           }
-          const result = resolveTarget(explicitId)
-          if (result.kind === 'error') {
-            sendJson(res, result.status, { error: result.message })
-            return
-          }
           if (sseClients.size === 0) {
             sendJson(res, 409, { error: 'no client connected' })
             return
           }
-          const event = draftMessage(result.id, text)
-          broadcast(event)
-          const target = targetById(result.id)
+          const target = await resolveTarget(explicitId)
+          broadcast(draftMessage(String(target.session.id), text))
           sendJson(res, 200, {
             ok: true,
-            sessionId: result.id,
-            title: target === undefined ? null : sessionTitle(target.session.events),
-            cwd: target === undefined ? null : (target.session.header.cwd ?? null),
+            sessionId: String(target.session.id),
+            title: sessionTitle(target.session.events),
+            cwd: target.session.header.cwd ?? null,
           })
         } catch (error: unknown) {
-          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
@@ -491,8 +727,7 @@ export function apply(ctx: Context): void {
           broadcast(notice)
           sendJson(res, 200, { ok: true, evicted })
         } catch (error: unknown) {
-          const status = error instanceof PayloadTooLargeError ? 413 : 500
-          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
@@ -506,8 +741,7 @@ export function apply(ctx: Context): void {
           outbox.ack(ids)
           sendJson(res, 200, { ok: true, acked: ids.length })
         } catch (error: unknown) {
-          const status = error instanceof PayloadTooLargeError ? 413 : 500
-          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
@@ -528,16 +762,7 @@ export function apply(ctx: Context): void {
             }
             explicitId = body.sessionId
           }
-          const result = resolveTarget(explicitId)
-          if (result.kind === 'error') {
-            sendJson(res, result.status, { error: result.message })
-            return
-          }
-          const target = targetById(result.id)
-          if (target === undefined) {
-            sendJson(res, 409, { error: 'no active session' })
-            return
-          }
+          const target = await resolveTarget(explicitId)
           target.agent.followup(createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
@@ -549,70 +774,245 @@ export function apply(ctx: Context): void {
             cwd: target.session.header.cwd ?? null,
           })
         } catch (error: unknown) {
-          const status = error instanceof PayloadTooLargeError ? 413 : 500
-          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
 
       if (req.method === 'GET' && pathname === '/dsh-bridge/output') {
-        const result = resolveTarget(url.searchParams.get('sessionId') ?? undefined)
-        if (result.kind === 'error') {
-          sendJson(res, result.status, { error: result.message })
-          return
+        try {
+          const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+          sendJson(res, 200, {
+            sessionId: String(target.session.id),
+            title: sessionTitle(target.session.events),
+            cwd: target.session.header.cwd ?? null,
+            text: latestAssistantText(target.agent.session.deriveMessages()),
+            running: ctx.agents.get(String(target.session.id))?.status === 'running',
+          })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
-        const target = targetById(result.id)
-        if (target === undefined) {
-          sendJson(res, 404, { error: 'no active session' })
-          return
-        }
-        sendJson(res, 200, {
-          sessionId: String(target.session.id),
-          title: sessionTitle(target.session.events),
-          cwd: target.session.header.cwd ?? null,
-          text: latestAssistantText(target.agent.session.deriveMessages()),
-          running: ctx.agents.get(String(target.session.id))?.status === 'running',
-        })
         return
       }
 
       // The prompt buffer's history: the session's user prompts, newest first.
       if (req.method === 'GET' && pathname === '/dsh-bridge/prompts') {
-        const result = resolveTarget(url.searchParams.get('sessionId') ?? undefined)
-        if (result.kind === 'error') {
-          sendJson(res, result.status, { error: result.message })
-          return
+        try {
+          const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+          sendJson(res, 200, {
+            sessionId: String(target.session.id),
+            prompts: userPrompts(target.agent.session.deriveMessages()).reverse(),
+          })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
-        const target = targetById(result.id)
-        if (target === undefined) {
-          sendJson(res, 404, { error: 'no active session' })
-          return
-        }
-        sendJson(res, 200, {
-          sessionId: String(target.session.id),
-          prompts: userPrompts(target.agent.session.deriveMessages()).reverse(),
-        })
         return
       }
 
       // The output buffer's reply navigation: the session's assistant
       // replies, newest first (the mirror of /prompts).
       if (req.method === 'GET' && pathname === '/dsh-bridge/replies') {
-        const result = resolveTarget(url.searchParams.get('sessionId') ?? undefined)
-        if (result.kind === 'error') {
-          sendJson(res, result.status, { error: result.message })
+        try {
+          const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+          sendJson(res, 200, {
+            sessionId: String(target.session.id),
+            replies: assistantReplies(target.agent.session.deriveMessages()).reverse(),
+            running: ctx.agents.get(String(target.session.id))?.status === 'running',
+          })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/resume') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown } | undefined
+          const id = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
+          if (id === null) {
+            sendJson(res, 400, { error: 'sessionId is required' })
+            return
+          }
+          const target = await ensureLive(id)
+          sendJson(res, 200, {
+            ok: true,
+            sessionId: String(target.session.id),
+            title: sessionTitle(target.session.events),
+            cwd: target.session.header.cwd ?? null,
+          })
+          broadcastSessionsChanged(String(target.session.id))
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/rename') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown; title?: unknown } | undefined
+          const id = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
+          const title = typeof body?.title === 'string' ? body.title : undefined
+          if (id === null || title === undefined) {
+            sendJson(res, 400, { error: 'sessionId and title are required' })
+            return
+          }
+          const sessionTitleService = ctx.get('sessionTitle') as SessionTitleService | undefined
+          if (sessionTitleService === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a session title service' })
+            return
+          }
+          const target = await ensureLive(id)
+          const snapshot = sessionTitleService.rename(target.session, title)
+          sendJson(res, 200, { ok: true, sessionId: id, title: snapshot.title })
+          broadcastSessionsChanged(id)
+        } catch (error: unknown) {
+          const status = isSessionTitleInvalidError(error) ? 400 : bridgeErrorStatus(error)
+          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/archive') {
+        try {
+          const body = (await readJson(req)) as { sessionId?: unknown } | undefined
+          const id = typeof body?.sessionId === 'string' && body.sessionId !== '' ? body.sessionId : null
+          if (id === null) {
+            sendJson(res, 400, { error: 'sessionId is required' })
+            return
+          }
+          const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+          if (workspaceRegistry === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a workspace registry (no archive support)' })
+            return
+          }
+          await workspaceRegistry.archiveSession(id)
+          sendJson(res, 200, { ok: true, sessionId: id })
+          broadcastSessionsChanged(id)
+        } catch (error: unknown) {
+          const status = isWorkspaceUnknownSessionError(error) ? 404 : bridgeErrorStatus(error)
+          sendJson(res, status, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      if (req.method === 'GET' && pathname === '/dsh-bridge/workspaces') {
+        const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+        if (workspaceRegistry === undefined) {
+          sendJson(res, 501, { error: 'profile lacks a workspace registry' })
           return
         }
-        const target = targetById(result.id)
-        if (target === undefined) {
-          sendJson(res, 404, { error: 'no active session' })
-          return
+        try {
+          const workspaces = workspaceRegistry.list().map(w => ({ id: w.id, title: w.title, path: w.path }))
+          sendJson(res, 200, { workspaces })
+        } catch (error: unknown) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
         }
-        sendJson(res, 200, {
-          sessionId: String(target.session.id),
-          replies: assistantReplies(target.agent.session.deriveMessages()).reverse(),
-          running: ctx.agents.get(String(target.session.id))?.status === 'running',
-        })
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/workspaces/rename') {
+        try {
+          const body = (await readJson(req)) as { workspaceId?: unknown; title?: unknown } | undefined
+          const workspaceId = typeof body?.workspaceId === 'string' && body.workspaceId !== '' ? body.workspaceId : null
+          const title = typeof body?.title === 'string' ? body.title : undefined
+          if (workspaceId === null || title === undefined) {
+            sendJson(res, 400, { error: 'workspaceId and title are required' })
+            return
+          }
+          const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+          if (workspaceRegistry === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a workspace registry' })
+            return
+          }
+          const workspace = workspaceRegistry.get(workspaceId)
+          if (workspace === undefined) {
+            sendJson(res, 404, { error: `workspace ${workspaceId} is not known` })
+            return
+          }
+          const normalized = title.trim()
+          if (normalized === '') {
+            sendJson(res, 400, { error: 'workspace title must contain visible characters' })
+            return
+          }
+          if (normalized === workspace.title) {
+            sendJson(res, 200, { ok: true, workspaceId, title: workspace.title })
+            return
+          }
+          if (workspaceTitleConflict(normalized, workspaceRegistry.list(), workspaceId)) {
+            sendJson(res, 409, { error: `workspace named ${normalized} exists` })
+            return
+          }
+          await workspace.setTitle(normalized)
+          sendJson(res, 200, { ok: true, workspaceId, title: normalized })
+          broadcastSessionsChanged()
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      if (req.method === 'POST' && pathname === '/dsh-bridge/sessions/create') {
+        try {
+          const body = (await readJson(req)) as {
+            workspaceId?: unknown
+            path?: unknown
+            workspaceTitle?: unknown
+          } | undefined
+          const workspaceId = typeof body?.workspaceId === 'string' && body.workspaceId !== '' ? body.workspaceId : undefined
+          const path = typeof body?.path === 'string' && body.path !== '' ? body.path : undefined
+          const workspaceTitle = typeof body?.workspaceTitle === 'string' ? body.workspaceTitle : undefined
+          if ((workspaceId === undefined) === (path === undefined)) {
+            sendJson(res, 400, { error: 'exactly one of workspaceId or path is required' })
+            return
+          }
+          const workspaceRegistry = ctx.get('workspaceRegistry') as WorkspaceRegistryService | undefined
+          if (workspaceRegistry === undefined) {
+            sendJson(res, 501, { error: 'profile lacks a workspace registry' })
+            return
+          }
+          let workspace: WorkspaceEntityService
+          if (workspaceId !== undefined) {
+            const existing = workspaceRegistry.get(workspaceId)
+            if (existing === undefined) {
+              sendJson(res, 404, { error: `workspace ${workspaceId} is not known` })
+              return
+            }
+            workspace = existing
+          } else {
+            const existing = await workspaceRegistry.resolveByPath(path as string)
+            if (existing !== undefined) {
+              workspace = existing
+            } else {
+              workspace = await workspaceRegistry.create(path as string, workspaceTitle)
+            }
+          }
+          const sessionId = `session-${randomUUID()}` as SessionId
+          const composition = await composeBridgeAgent(undefined)
+          const handle = await ctx.agents.create({
+            sessionId,
+            meta: {
+              cwd: workspace.path,
+              ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
+            },
+            agentOptions: composition.agentOptions,
+            setup: composition.setup,
+          })
+          try {
+            await workspace.attachSession(String(sessionId))
+          } catch (attachError: unknown) {
+            await handle.dispose()
+            throw attachError
+          }
+          sendJson(res, 201, {
+            ok: true,
+            sessionId: String(sessionId),
+            workspaceId: String(workspace.id),
+            cwd: workspace.path,
+          })
+          broadcastSessionsChanged(String(sessionId))
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
         return
       }
 

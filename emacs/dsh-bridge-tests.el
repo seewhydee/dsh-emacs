@@ -125,8 +125,8 @@ round-trip."
     (dsh-bridge-clear-default-target))
   (should (null dsh-bridge-default-session)))
 
-(ert-deftest dsh-bridge-set-default-target-offers-live-sessions-only ()
-  "Completion offers live sessions (plus the last-active choice) only."
+(ert-deftest dsh-bridge-set-default-target-offers-saved-sessions ()
+  "Completion offers live and saved sessions (plus the last-active choice)."
   (let ((table-seen nil)
         (dsh-bridge-default-session nil))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
@@ -139,7 +139,7 @@ round-trip."
                  "(last-active)")))
       (call-interactively #'dsh-bridge-set-default-target))
     (should (equal (all-completions "" table-seen)
-                   '("a" "(last-active)")))))
+                   '("a" "b" "(last-active)")))))
 
 (ert-deftest dsh-bridge-target-label ()
   (let ((dsh-bridge-default-session nil)
@@ -180,10 +180,10 @@ round-trip."
     ;; s1 has no activity timestamps -> 0; s2's lastActive wins.
     (should (equal (dsh-bridge--resolved-active-label) "Older"))))
 
-(ert-deftest dsh-bridge-session-not-live-message ()
+(ert-deftest dsh-bridge-session-unknown-message ()
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
-    (should (string-match-p "session T is not live"
-                            (dsh-bridge--session-not-live-message "s1")))))
+    (should (string-match-p "session T is not known"
+                            (dsh-bridge--session-unknown-message "s1")))))
 
 (ert-deftest dsh-bridge-send-text-records-last-resolved ()
   "A nil-target send records the host-resolved session for display."
@@ -582,7 +582,7 @@ binds the compose keys plus fetch/set-session/list."
   (let ((dsh-bridge-default-session "default"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
-      (cl-letf (((symbol-function 'dsh-bridge--read-live-session-id)
+      (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
                  (lambda (_prompt _pseudo) "live-1"))
                 ((symbol-function 'dsh-bridge--set-prompt-session)
                  (lambda (id) (setq-local dsh-bridge--prompt-session id))))
@@ -741,19 +741,39 @@ session and never touches the default target."
       (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
 
 (ert-deftest dsh-bridge-reply-not-live-message ()
-  "Reply to a dead shown session gives the not-live message, no binding."
-  (let ((dsh-bridge--sessions-cache '(((id . "gone") (live . nil))))
-        (bound nil) (msg nil))
+  "Reply to an unknown session gives the not-known message, no resume attempt."
+  (let ((dsh-bridge--sessions-cache nil)
+        (bound nil) (msg nil) (resumed nil))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "gone")
       (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
                  (lambda (id) (setq bound id)))
+                ((symbol-function 'dsh-bridge--resume-session)
+                 (lambda (id) (setq resumed id) nil))
                 ((symbol-function 'message)
                  (lambda (&rest args) (setq msg (apply #'format args)))))
         (dsh-bridge-reply))
       (should (null bound))
-      (should (string-match-p "not live" msg)))))
+      (should (null resumed))
+      (should (string-match-p "not known" msg)))))
+
+(ert-deftest dsh-bridge-reply-resume-failure-keeps-host-message ()
+  "A failed resume's host error is not overwritten by the not-known message."
+  (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
+        (bound nil) (msg nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "saved-1")
+      (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+                 (lambda (id) (setq bound id)))
+                ((symbol-function 'dsh-bridge--resume-session)
+                 (lambda (_id) (message "dsh-bridge: HTTP 409: subagent-owned") nil))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-reply))
+      (should (null bound))
+      (should (string-match-p "HTTP 409" msg)))))
 
 (ert-deftest dsh-bridge-copy-reply ()
   "`dsh-bridge-copy-reply' copies the whole reply without a region."
@@ -943,8 +963,9 @@ the anchor at the newest."
 ;;; The sessions list
 
 (ert-deftest dsh-bridge-sessions-keymap ()
-  "RET/r open, t sets the default target, u clears it, f peeks, and p is
-previous-line again."
+  "RET/r open, t sets the default target, u clears it, f peeks, v toggles
+archived visibility, R renames, d archives, + creates, W renames the workspace,
+and p is previous-line again."
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "RET"))
               #'dsh-bridge-open-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "r"))
@@ -956,7 +977,15 @@ previous-line again."
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "f"))
               #'dsh-bridge-peek-session))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "v"))
-              #'dsh-bridge-toggle-sessions-display))
+              #'dsh-bridge-toggle-archived-sessions))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "R"))
+              #'dsh-bridge-rename-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "d"))
+              #'dsh-bridge-archive-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "+"))
+              #'dsh-bridge-create-session))
+  (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "W"))
+              #'dsh-bridge-rename-workspace))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "w"))
               #'dsh-bridge-copy-session-id))
   (should (eq (lookup-key dsh-bridge-sessions-mode-map (kbd "D"))
@@ -988,11 +1017,31 @@ untouched."
     (should popped)))
 
 (ert-deftest dsh-bridge-open-session-not-live-message ()
-  "RET on a saved row reports the consistent not-live message."
+  "RET on an unknown id reports the not-known message, with no resume attempt."
+  (let ((dsh-bridge--sessions-cache nil)
+        (bound nil) (msg nil) (resumed nil))
+    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+               (lambda (id) (setq bound id)))
+              ((symbol-function 'dsh-bridge--resume-session)
+               (lambda (id) (setq resumed id) nil))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (insert (propertize "gone row" 'tabulated-list-id "gone"))
+        (goto-char (point-min))
+        (dsh-bridge-open-session)))
+    (should (null bound))
+    (should (null resumed))
+    (should (string-match-p "not known" msg))))
+
+(ert-deftest dsh-bridge-open-session-resume-failure-keeps-host-message ()
+  "RET on a saved row whose resume fails keeps the host's error message."
   (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
         (bound nil) (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
                (lambda (id) (setq bound id)))
+              ((symbol-function 'dsh-bridge--resume-session)
+               (lambda (_id) (message "dsh-bridge: HTTP 409: subagent-owned") nil))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (with-temp-buffer
@@ -1000,7 +1049,26 @@ untouched."
         (goto-char (point-min))
         (dsh-bridge-open-session)))
     (should (null bound))
-    (should (string-match-p "not live" msg))))
+    (should (string-match-p "HTTP 409" msg))))
+
+(ert-deftest dsh-bridge-open-session-resumes-saved ()
+  "RET on a saved row resumes it first, then binds the prompt buffer."
+  (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
+        (bound nil) (popped nil) (resumed nil))
+    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+               (lambda (id) (setq bound id)))
+              ((symbol-function 'dsh-bridge--resume-session)
+               (lambda (id) (setq resumed id) t))
+              ((symbol-function 'dsh-bridge--prompt-buffer)
+               (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
+      (with-temp-buffer
+        (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1"))
+        (goto-char (point-min))
+        (dsh-bridge-open-session)))
+    (should (equal resumed "saved-1"))
+    (should (equal bound "saved-1"))
+    (should popped)))
 
 (ert-deftest dsh-bridge-set-default-target-at-point ()
   "`t' sets the default target to the row's session."
@@ -1022,7 +1090,8 @@ untouched."
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  '(((id . "live-1") (live . t) (running . t) (title . "First live")
-                    (cwd . "/a") (lastActive . 1700000000000))
+                    (cwd . "/a") (lastActive . 1700000000000)
+                    (workspace . "WS A") (workspaceId . "w1"))
                    ((id . "saved-1") (live . nil) (title . "A saved one") (cwd . "/b")
                     (createdAt . 1690000000000)))))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
@@ -1048,11 +1117,9 @@ untouched."
         ;; (amber), `?' for saved (no live agent).
         (should (equal (aref live-cells 1) "●"))
         (should (equal (aref saved-cells 1) "?"))
-        ;; Session name (index 2): unaltered name, saved face for saved rows.
+        ;; Session name (index 2): unaltered name; cold rows have no face now.
         (should (equal (aref live-cells 2) "First live"))
         (should (equal (aref saved-cells 2) "A saved one"))
-        (should (eq (get-text-property 0 'face (aref saved-cells 2))
-                    'dsh-bridge-saved-session-face))
         ;; Age (index 3) carries the raw activity timestamp.
         (should (equal (get-text-property 0 'dsh-bridge-age-ts
                                           (aref live-cells 3))
@@ -1060,8 +1127,8 @@ untouched."
         (should (equal (get-text-property 0 'dsh-bridge-age-ts
                                           (aref saved-cells 3))
                        1690000000000))
-        ;; Workspace (index 4) is the cwd basename without a workspace title.
-        (should (equal (aref live-cells 4) "a"))
+        ;; Workspace (index 4) is the workspace title, else the cwd basename.
+        (should (equal (aref live-cells 4) "WS A"))
         (should (equal (aref saved-cells 4) "b"))))))
 
 (ert-deftest dsh-bridge-session-cell-disambiguates-untitled ()
@@ -1092,8 +1159,8 @@ plain."
              (cells (cadr (assoc "live-1" entries))))
         (should (equal (aref cells 5) "live-1"))))))
 
-(ert-deftest dsh-bridge-sessions-display-modes ()
-  "Display modes cycle live+saved, live, and live+saved+archived."
+(ert-deftest dsh-bridge-sessions-archived-toggle ()
+  "The `v' toggle shows/hides archived sessions; live and cold rows stay visible."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
   (let ((dsh-bridge-default-session nil))
@@ -1105,43 +1172,177 @@ plain."
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions)
       (let ((buf (get-buffer "*dsh-bridge-sessions*")))
-        ;; Default (live+saved): live + saved shown, archived excluded.
+        ;; Default: archived hidden.
         (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
           (should (assoc "live-1" entries))
           (should (assoc "saved-1" entries))
           (should-not (assoc "arch-1" entries)))
-        ;; Cycle -> live: only live.
-        (with-current-buffer buf (dsh-bridge-toggle-sessions-display))
+        ;; Toggle on: archived shown too.
+        (with-current-buffer buf (dsh-bridge-toggle-archived-sessions))
         (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
-          (should (assoc "live-1" entries))
-          (should-not (assoc "saved-1" entries))
-          (should-not (assoc "arch-1" entries)))
-        ;; Cycle -> all: everything, including archived.
-        (with-current-buffer buf (dsh-bridge-toggle-sessions-display))
-        (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
-          (should (assoc "live-1" entries))
-          (should (assoc "saved-1" entries))
           (should (assoc "arch-1" entries)))
-        ;; Cycle again -> back to live+saved.
-        (with-current-buffer buf (dsh-bridge-toggle-sessions-display))
+        ;; Toggle off: archived hidden again.
+        (with-current-buffer buf (dsh-bridge-toggle-archived-sessions))
         (let ((entries (buffer-local-value 'tabulated-list-entries buf)))
-          (should (assoc "live-1" entries))
-          (should (assoc "saved-1" entries))
           (should-not (assoc "arch-1" entries)))))))
 
 (ert-deftest dsh-bridge-session-visible-p ()
-  "Visibility depends on the display mode, live state, and archived flag."
-  (let ((dsh-bridge--sessions-display 'live-saved))
+  "Visibility depends only on the archived flag and the archived toggle."
+  (let ((dsh-bridge--sessions-archived-p nil))
     (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))
     (should (dsh-bridge--session-visible-p '((live . nil) (cwd . "/b"))))
     (should-not (dsh-bridge--session-visible-p '((live . nil) (archived . t)))))
-  (let ((dsh-bridge--sessions-display 'live))
-    (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))
-    (should-not (dsh-bridge--session-visible-p '((live . nil) (cwd . "/b"))))
-    (should-not (dsh-bridge--session-visible-p '((live . t) (archived . t)))))
-  (let ((dsh-bridge--sessions-display 'all))
+  (let ((dsh-bridge--sessions-archived-p t))
     (should (dsh-bridge--session-visible-p '((live . nil) (archived . t))))
     (should (dsh-bridge--session-visible-p '((live . t) (cwd . "/a"))))))
+
+(ert-deftest dsh-bridge-rename-session-sends-row-id ()
+  "Rename from the sessions list sends the row's session id and prompted title."
+  (let ((calls nil))
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (_prompt &optional _default) "New title"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'ok t))))))
+      (with-temp-buffer
+        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (goto-char (point-min))
+        (dsh-bridge-rename-session)))
+    (let ((rename (cadr (assoc "/sessions/rename"
+                               (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should rename)
+      (should (equal (car rename) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr rename))) "s1"))
+      (should (equal (cdr (assoc 'title (caddr rename))) "New title")))))
+
+(ert-deftest dsh-bridge-archive-session-marshals-args ()
+  "Archive confirms, then POSTs the session id to /sessions/archive."
+  (let ((calls nil) (msg nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'ok t)))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-temp-buffer
+        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (goto-char (point-min))
+        (dsh-bridge-archive-session)))
+    (let ((archive (cadr (assoc "/sessions/archive"
+                                (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should archive)
+      (should (equal (car archive) "POST"))
+      (should (equal (cdr (assoc 'sessionId (caddr archive))) "s1"))
+      (should (string-match-p "archived session" msg)))))
+
+(ert-deftest dsh-bridge-archive-session-aborts-on-no ()
+  "Archive declines without a request when the user answers no."
+  (let ((called nil))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (setq called (list method path payload))
+                 (cons 200 (list (cons 'ok t))))))
+      (with-temp-buffer
+        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (goto-char (point-min))
+        (dsh-bridge-archive-session)))
+    (should (null called))))
+
+(ert-deftest dsh-bridge-rename-workspace-marshals-args ()
+  "Rename-workspace POSTs the row's workspace id and new title."
+  (let ((dsh-bridge--sessions-cache
+         '(((id . "s1") (workspaceId . "w1") (workspace . "WS"))))
+        (calls nil))
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (_prompt &optional _default) "New WS"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) calls)
+                 (cons 200 (list (cons 'ok t))))))
+      (with-temp-buffer
+        (insert (propertize "s1 row" 'tabulated-list-id "s1"))
+        (goto-char (point-min))
+        (dsh-bridge-rename-workspace)))
+    (let ((rename (cadr (assoc "/workspaces/rename"
+                               (mapcar (lambda (c) (list (cadr c) c)) calls)))))
+      (should rename)
+      (should (equal (cdr (assoc 'workspaceId (caddr rename))) "w1"))
+      (should (equal (cdr (assoc 'title (caddr rename))) "New WS")))))
+
+(ert-deftest dsh-bridge-create-session-marshals-args ()
+  "Create GETs /workspaces, then POSTs the chosen workspace and binds the new
+session as default target."
+  (let ((called nil) (bound-target nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt _table &optional _pred _req) "WS B"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) called)
+                 (if (equal path "/workspaces")
+                     (cons 200
+                           (list (cons 'workspaces
+                                       (list (list (cons 'id "w1") (cons 'title "WS A"))
+                                             (list (cons 'id "w2") (cons 'title "WS B"))))))
+                   (cons 201 (list (cons 'sessionId "s-new"))))))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
+              ((symbol-function 'dsh-bridge-set-default-target)
+               (lambda (id) (setq bound-target id))))
+      (dsh-bridge-create-session))
+    (let ((get (cdr (assoc "/workspaces" (mapcar (lambda (c) (list (cadr c) c)) called))))
+          (create (cadr (assoc "/sessions/create"
+                               (mapcar (lambda (c) (list (cadr c) c)) called)))))
+      (should get)
+      (should create)
+      (should (equal (cdr (assoc 'workspaceId (caddr create))) "w2"))
+      (should (equal bound-target "s-new")))))
+
+(ert-deftest dsh-bridge-create-session-empty-workspaces ()
+  "A 200 with an empty workspace list still offers \"New workspace…\"."
+  (let ((called nil) (table-seen nil) (bound-target nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _rest)
+                 (setq table-seen table)
+                 "New workspace…"))
+              ((symbol-function 'read-directory-name)
+               (lambda (&rest _) default-directory))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) ""))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) called)
+                 (if (equal path "/workspaces")
+                     (cons 200 (list (cons 'workspaces nil)))
+                   (cons 201 (list (cons 'sessionId "s-new"))))))
+              ((symbol-function 'dsh-bridge--fetch-sessions) (lambda () nil))
+              ((symbol-function 'dsh-bridge--refresh-sessions-buffer) (lambda () nil))
+              ((symbol-function 'dsh-bridge-set-default-target)
+               (lambda (id) (setq bound-target id))))
+      (dsh-bridge-create-session))
+    (should (member "New workspace…" table-seen))
+    (let ((create (cadr (assoc "/sessions/create"
+                               (mapcar (lambda (c) (list (cadr c) c)) called)))))
+      (should create)
+      (should (equal (cdr (assoc 'path (caddr create))) default-directory)))
+    (should (equal bound-target "s-new"))))
+
+(ert-deftest dsh-bridge-create-session-rejects-non-directory ()
+  "A \"New workspace…\" path that is not a directory is a user error, no POST."
+  (let ((called nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "New workspace…"))
+              ((symbol-function 'read-directory-name)
+               (lambda (&rest _) "/nonexistent-dsh-bridge-test-dir/"))
+              ((symbol-function 'dsh-bridge--request)
+               (lambda (method path payload)
+                 (push (list method path payload) called)
+                 (cons 200 (list (cons 'workspaces nil))))))
+      (should-error (dsh-bridge-create-session) :type 'user-error))
+    (should-not (assoc "/sessions/create"
+                       (mapcar (lambda (c) (list (cadr c) c)) called)))))
 
 (ert-deftest dsh-bridge-status-cell ()
   "The status cell shows the indicator glyph: filled circle for running and

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assistantReplies,
+  classifySessionId,
   draftMessage,
   hostnameOf,
   isLoopbackAddress,
@@ -15,16 +16,19 @@ import {
   parseBearerAuthorization,
   resolveTargetId,
   sessionTitle,
+  sessionsChangedMessage,
   tokenRequestsSameOrigin,
   tokensEqual,
   turnCompleteMessage,
   turnStartMessage,
   userPrompts,
-  workspaceTitlesBySession,
+  workspaceRefsBySession,
+  workspaceTitleConflict,
   type LiveSessionLike,
   type MessageLike,
   type SessionEventLike,
   type SessionHeaderLike,
+  type WorkspaceLike,
 } from '../src/logic.ts'
 
 function liveSession(id: string, opts: { cwd?: string; createdAt?: number; eventTimes?: number[]; events?: SessionEventLike[]; running?: boolean } = {}): LiveSessionLike {
@@ -38,6 +42,10 @@ function liveSession(id: string, opts: { cwd?: string; createdAt?: number; event
 
 function header(id: string, opts: { cwd?: string; createdAt?: number; origin?: string; title?: string | null } = {}): SessionHeaderLike {
   return { id, cwd: opts.cwd, createdAt: opts.createdAt ?? 0, origin: opts.origin, title: opts.title }
+}
+
+function workspace(id: string, title: string, sessionIds: readonly string[]): WorkspaceLike {
+  return { id, title, path: `/${id}`, sessionIds }
 }
 
 function message(role: string, blocks: Array<{ type: string; text?: string }>): MessageLike {
@@ -218,53 +226,109 @@ describe('sessionTitle', () => {
   })
 })
 
-describe('workspaceTitlesBySession', () => {
-  it('maps session ids to their workspace titles', () => {
-    const map = workspaceTitlesBySession([
-      { title: 'alpha', sessionIds: ['s1', 's2'] },
-      { title: 'beta', sessionIds: ['s3'] },
+describe('workspaceRefsBySession', () => {
+  it('maps session ids to their workspace refs (id + title)', () => {
+    const map = workspaceRefsBySession([
+      workspace('w1', 'alpha', ['s1', 's2']),
+      workspace('w2', 'beta', ['s3']),
     ])
-    expect(map.get('s1')).toBe('alpha')
-    expect(map.get('s2')).toBe('alpha')
-    expect(map.get('s3')).toBe('beta')
+    expect(map.get('s1')).toEqual({ id: 'w1', title: 'alpha' })
+    expect(map.get('s2')).toEqual({ id: 'w1', title: 'alpha' })
+    expect(map.get('s3')).toEqual({ id: 'w2', title: 'beta' })
     expect(map.get('s4')).toBeUndefined()
   })
 
   it('returns an empty map for no workspaces', () => {
-    expect(workspaceTitlesBySession([]).size).toBe(0)
+    expect(workspaceRefsBySession([]).size).toBe(0)
+  })
+})
+
+describe('classifySessionId', () => {
+  it('classifies live, cold, and unknown ids', () => {
+    expect(classifySessionId('a', new Set(['a']), new Set(['b']))).toBe('live')
+    expect(classifySessionId('b', new Set(['a']), new Set(['b']))).toBe('cold')
+    expect(classifySessionId('c', new Set(['a']), new Set(['b']))).toBe('unknown')
+  })
+
+  it('treats a persisted id in both tiers as live (live wins)', () => {
+    expect(classifySessionId('a', new Set(['a']), new Set(['a']))).toBe('live')
+  })
+})
+
+describe('workspaceTitleConflict', () => {
+  it('flags a title held by another workspace', () => {
+    const workspaces = [workspace('w1', 'alpha', []), workspace('w2', 'beta', [])]
+    expect(workspaceTitleConflict('alpha', workspaces)).toBe(true)
+  })
+
+  it('does not flag the same-title rename of the excluded workspace', () => {
+    const workspaces = [workspace('w1', 'alpha', []), workspace('w2', 'beta', [])]
+    expect(workspaceTitleConflict('alpha', workspaces, 'w1')).toBe(false)
+  })
+
+  it('does not flag a title no workspace holds', () => {
+    const workspaces = [workspace('w1', 'alpha', []), workspace('w2', 'beta', [])]
+    expect(workspaceTitleConflict('gamma', workspaces)).toBe(false)
+  })
+
+  it('returns false for an empty roster', () => {
+    expect(workspaceTitleConflict('alpha', [])).toBe(false)
   })
 })
 
 describe('resolveTargetId', () => {
   const live = [liveSession('a', { createdAt: 10, eventTimes: [40] }), liveSession('b', { createdAt: 20, eventTimes: [50] })]
+  const persisted = [header('c', { createdAt: 30 }), header('d', { createdAt: 25, origin: 'subagent' })]
 
-  it('honors an explicit id', () => {
-    const result = resolveTargetId('a', live, () => true)
+  it('honors an explicit live id', () => {
+    const result = resolveTargetId('a', live, [], () => true)
     expect(result).toEqual({ kind: 'target', id: 'a' })
   })
 
-  it('rejects an explicit id that is not live with 404', () => {
-    const result = resolveTargetId('nope', live, () => true)
+  it('rejects an explicit id that is neither live nor persisted with 404', () => {
+    const result = resolveTargetId('nope', live, persisted, () => true)
     expect(result).toEqual({ kind: 'error', status: 404, message: 'session nope is not live' })
   })
 
   it('rejects a live id with no agent with 409', () => {
-    const result = resolveTargetId('a', live, id => id !== 'a')
+    const result = resolveTargetId('a', live, persisted, id => id !== 'a')
     expect(result).toEqual({ kind: 'error', status: 409, message: 'session a has no live agent' })
   })
 
-  it('picks the most recently active session with no explicit id', () => {
-    const result = resolveTargetId(undefined, live, () => true)
+  it('returns a cold result for an explicit persisted id', () => {
+    const result = resolveTargetId('c', live, persisted, () => true)
+    expect(result).toEqual({ kind: 'cold', id: 'c' })
+  })
+
+  it('treats an explicit subagent-origin persisted id as cold (resume guard rejects it)', () => {
+    const result = resolveTargetId('d', live, persisted, () => true)
+    expect(result).toEqual({ kind: 'cold', id: 'd' })
+  })
+
+  it('picks the most recently active live session with no explicit id', () => {
+    const result = resolveTargetId(undefined, live, persisted, () => true)
     expect(result).toEqual({ kind: 'target', id: 'b' })
   })
 
   it('skips sessions without a live agent when picking last-active', () => {
-    const result = resolveTargetId(undefined, live, id => id !== 'b')
+    const result = resolveTargetId(undefined, live, persisted, id => id !== 'b')
     expect(result).toEqual({ kind: 'target', id: 'a' })
   })
 
-  it('reports no active session with 409 when nothing is targetable', () => {
-    const result = resolveTargetId(undefined, [], () => true)
+  it('falls back to the most recent cold session when nothing is live', () => {
+    const liveNoAgent = [liveSession('b', { createdAt: 20, eventTimes: [50] })]
+    const result = resolveTargetId(undefined, liveNoAgent, persisted, () => false)
+    expect(result).toEqual({ kind: 'cold', id: 'c' })
+  })
+
+  it('skips subagent-origin sessions when picking the cold fallback', () => {
+    const persistedWithSubagent = [header('c', { createdAt: 30 }), header('sub', { createdAt: 40, origin: 'subagent' })]
+    const result = resolveTargetId(undefined, [], persistedWithSubagent, () => true)
+    expect(result).toEqual({ kind: 'cold', id: 'c' })
+  })
+
+  it('reports no active session with 409 when nothing is live or persisted', () => {
+    const result = resolveTargetId(undefined, [], [], () => true)
     expect(result).toEqual({ kind: 'error', status: 409, message: 'no active session' })
   })
 })
@@ -407,6 +471,18 @@ describe('turnCompleteMessage', () => {
   it('emits one SSE data frame carrying the turn-end reason kind', () => {
     expect(turnCompleteMessage('session-1', 'completed')).toBe(
       'data: {"kind":"turn-complete","sessionId":"session-1","reason":"completed"}\n\n',
+    )
+  })
+})
+
+describe('sessionsChangedMessage', () => {
+  it('emits a bare inventory-change frame without a session id', () => {
+    expect(sessionsChangedMessage()).toBe('data: {"kind":"sessions-changed"}\n\n')
+  })
+
+  it('emits a frame naming the changed session when one is given', () => {
+    expect(sessionsChangedMessage('session-1')).toBe(
+      'data: {"kind":"sessions-changed","sessionId":"session-1"}\n\n',
     )
   })
 })

@@ -142,11 +142,17 @@ The following commands are available from the DSH-Sessions buffer:
 
 * `q` — quit the window and bury the buffer.
 * `f` — fetch the last output for the session at point into a DSH-View buffer.
-* `r` or `RET` — open a DSH-Prompt buffer for the session at point.
-* `t` — set the session at point as the default target.
+* `r` or `RET` — open a DSH-Prompt buffer for the session at point.  A saved
+  (cold, persisted-only) session is resumed first, echoing `resuming…`, so
+  every session in the list is simply a session.
+* `t` — set the session at point as the default target (resuming a saved
+  session first).
 * `u` — clear the default target.
-* `v` — cycle session display between `live+saved` (default), `live`, and
-        `live+saved+archived`.
+* `v` — toggle whether archived sessions are shown (hidden by default).
+* `R` — rename the session at point.
+* `d` — archive the session at point.
+* `+` — create a new session, optionally in a new workspace.
+* `W` — rename the workspace of the session at point.
 * `g` — refresh the DSH-Sessions buffer.
 
 For a full list, see the menu bar.  Other `tabulated-list-mode` keys
@@ -157,10 +163,7 @@ are also available.
 This read-only buffer contains the model output for a DSH session.  It
 is fetched by `f` from the transient menu or the DSH-Sessions buffer,
 `C-c C-f` from the DSH-Prompt buffer, or pushed from the web UI's
-"Send to Emacs" button (see below).  The header line shows the session's
-status glyph (`●` filled green when idle, `●` amber when running, `?` unknown), a `↓`-marked time
-when the reply was pushed (vs `· <time>` for a fetch), and the reply's
-newest-first position `(k/n)`.
+"Send to Emacs" button (see below).
 
 The following commands are available:
 
@@ -185,12 +188,8 @@ DSH-View buffer opens a prompt for the same session.
 
 The following commands are available from the DSH-Prompt buffer:
 
-* `C-c C-c` — send the region, or the whole buffer, as a prompt and, on
-  success, bury the buffer (the text survives, unmodified, for
-  edit-and-resubmit).  The prompt buffer's header shows the session's
-  status glyph and a `✓ sent HH:MM` marker when the current text was just
-  sent; with `dsh-bridge-prompt-resend-confirm` (the default) an identical
-  re-send first asks for confirmation.
+* `C-c C-c` — send the region, or the whole buffer, as a prompt.  On
+  success, bury the buffer.
 * `C-c C-d` — push it to the DSH composer as a draft instead.
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
@@ -226,9 +225,10 @@ loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
 HTTP request bodies are capped at 1 MiB; larger bodies get a 413
 error.  DSH-to-Emacs messages are held in a bounded outbox (100
 unacknowledged entries); overflow evicts the oldest entries and is
-reported to the collector.  Requests naming a non-live session fail
-with 404/409; a draft push fails with 409 when no browser client is
-subscribed.
+reported to the collector.  Naming a cold (persisted-only) session
+from Emacs resumes it on demand, matching the web UI; an id neither
+live nor persisted is 404, a subagent-owned session is 409, and a
+draft push fails with 409 when no browser client is subscribed.
 
 ## License
 
