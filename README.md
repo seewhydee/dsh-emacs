@@ -142,9 +142,7 @@ The following commands are available from the DSH-Sessions buffer:
 
 * `q` — quit the window and bury the buffer.
 * `f` — fetch the last output for the session at point into a DSH-View buffer.
-* `r` or `RET` — open a DSH-Prompt buffer for the session at point.  A saved
-  (cold, persisted-only) session is resumed first, echoing `resuming…`, so
-  every session in the list is simply a session.
+* `r` or `RET` — open a DSH-Prompt buffer for the session at point.
 * `t` — set the session at point as the default target (resuming a saved
   session first).
 * `u` — clear the default target.
