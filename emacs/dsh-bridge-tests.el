@@ -36,27 +36,38 @@
   (should (equal (dsh-bridge--path "/output" "session-1")
                  "/output?sessionId=session-1")))
 
+(defmacro dsh-bridge-test--with-token-file (content &rest body)
+  "Run BODY with `dsh-bridge-token-file' bound to a temp file holding CONTENT."
+  (declare (indent 1))
+  `(let* ((file (make-temp-file "dsh-bridge-token"))
+          (dsh-bridge-token-file file))
+     (unwind-protect
+         (progn
+           (with-temp-file file (insert ,content))
+           ,@body)
+       (delete-file file))))
+
 (ert-deftest dsh-bridge-extra-headers-with-token ()
-  (let ((dsh-bridge-token "secret"))
+  (dsh-bridge-test--with-token-file "secret"
     (should (equal (dsh-bridge--extra-headers nil)
                    '(("Authorization" . "Bearer secret"))))))
 
 (ert-deftest dsh-bridge-extra-headers-with-payload-and-token ()
-  (let ((dsh-bridge-token "secret"))
+  (dsh-bridge-test--with-token-file "secret"
     (should (equal (dsh-bridge--extra-headers '((text . "x")))
                    '(("Content-Type" . "application/json")
                      ("Authorization" . "Bearer secret"))))))
 
 (ert-deftest dsh-bridge-extra-headers-no-token ()
-  (let ((dsh-bridge-token nil)
-        (dsh-bridge-token-file "/nonexistent/dsh-bridge-token"))
+  (let ((dsh-bridge-token-file "/nonexistent/dsh-bridge-token"))
     (should (equal (dsh-bridge--extra-headers nil) nil))))
 
 (ert-deftest dsh-bridge-extra-headers-token-is-unibyte ()
   ;; A multibyte (even pure-ASCII) token header value poisons url-http's
   ;; request concatenation: a body containing non-ASCII bytes then fails
-  ;; with "Multibyte text in HTTP request" (bug#23750).
-  (let ((dsh-bridge-token (string-to-multibyte "secret")))
+  ;; with "Multibyte text in HTTP request" (bug#23750).  The token is read
+  ;; from the file as multibyte text, then coerced to unibyte.
+  (dsh-bridge-test--with-token-file "secret"
     (dolist (pair (dsh-bridge--extra-headers '((text . "x"))))
       (should-not (multibyte-string-p (car pair)))
       (should-not (multibyte-string-p (cdr pair))))))
