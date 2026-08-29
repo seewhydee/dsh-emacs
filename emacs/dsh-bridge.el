@@ -100,92 +100,92 @@ every `/dsh-bridge' route on the DSH loopback interface."
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-prompt-markdown t
-  "Use `markdown-mode' as the parent of `dsh-bridge-prompt-mode' when available.
-markdown-mode is not part of Emacs core.  When it is not installed, or this
-option is nil, the prompt buffer derives from `text-mode'.	The choice is
-resolved when this package is loaded; changing the option takes effect after
-reloading."
+  "Whether to try using `markdown-mode' in DSH-Prompt buffers.
+If non-nil and `markdown-mode' is installed, `dsh-bridge-prompt-mode'
+derives from `markdown-mode'.  Otherwise, it derives from `text-mode'.
+Changing this option requires a reload to take effect."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-view-gfm t
-  "Font-lock `*dsh-bridge-output*' as GitHub-Flavored Markdown when available.
-When non-nil and `markdown-mode' is installed, the output buffer's replies are
-font-locked as GFM with native code-block highlighting.	 The keymap is
-identical either way (the view mode bases on `special-mode' regardless)."
+  "Whether to font-lock DSH-View buffers as GitHub-Flavored Markdown.
+If non-nil and `markdown-mode' is installed, `dsh-bridge-view-mode'
+font-locks as GitHub-Flavored Markdown (GFM) with native code-block
+highlighting.  This affects font-locking only, and has no effect on the
+keybindings offered by `dsh-bridge-view-mode'."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-receive-pop t
-  "When non-nil, receiving a \"Send to Emacs\" message selects the output buffer.
-The push originates from the user clicking the button in the DSH web UI, so
-the common flow is to then switch to Emacs and want the message visible;
-popping selects `*dsh-bridge-output*' for you.	Set to nil to fill the buffer
-without selecting it (an unsolicited push never steals focus)."
+  "If non-nil, \"Send to Emacs\" from DSH pops to the buffer.
+When the user clicks the \"Send to Emacs\" button in DSH, the specified
+assistant text is pushed to the `*dsh-bridge-output*' buffer.  If this
+option is non-nil, run `pop-to-buffer' to select and display that buffer
+as well.  If nil, the buffer is filled but not selected."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-show-session-ids nil
-  "When non-nil, show raw DSH session ids in the sessions list.
-Session ids are internal to the bridge; by default the list and the selector
-show only friendly labels.	Enable this for debugging."
+  "If non-nil, show raw session IDs in the DSH-Sessions buffer.
+If nil (the default), session IDs are not shown, and sessions are only
+identified by their title and workspace."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-sessions-show-archived nil
-  "Whether `*dsh-bridge-sessions*' shows archived sessions by default.
-Archived sessions are hidden from grouping surfaces (one-way: DSH has no
-unarchive), so the default hides them, mirroring the web UI.  `v' toggles
-archived visibility for the current buffer."
+  "Whether the DSH-Sessions buffer shows archived sessions by default.
+The default is to hide them, similar to the DSH web interface.  The user
+can also toggle visibility via `dsh-bridge-toggle-archived-sessions'."
   :type 'boolean
   :group 'dsh-bridge)
 
-(defcustom dsh-bridge-status-indicator 'geometric
+(defcustom dsh-bridge-status-indicator 'emoji
   "How the session status appears in header lines and the sessions list.
-`geometric' uses filled-circle glyphs — `●' colored green when idle, `●'
-colored amber when running, `?' for unknown — with face color on GUI frames;
-`emoji' uses 🟢/🟡/⚪ (render as tofu in many terminals); `text' uses
-`·'/`…'/`?'; `none' hides the indicator entirely, leaving the status conveyed
-only by context."
-  :type '(choice (const :tag "Geometric (tty-safe)" geometric)
-				 (const :tag "Emoji" emoji)
+The value should be one of the following:
+
+- `emoji': 🟢/🟡/⚪ for idle/running/unknown.  This is the default, but
+  may not be supported on all terminals.
+- `geometric': ●/■/? for idle/running/unknown, with the first two glyphs
+  colored green/amber.
+- `text': ✓/…/? for idle/running/unknown.
+- `none': hide the indicator entirely."
+  :type '(choice (const :tag "Emojis" emoji)
+				 (const :tag "Geometric glyphs" geometric)
 				 (const :tag "Text" text)
 				 (const :tag "None" none))
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-turn-complete 'refetch
   "What to do when a session's turn completes on the host.
-`refetch' refills the shown reply in `*dsh-bridge-output*' when the completing
-session is the one it shows (without stealing focus) and refreshes the
-reply-position count; `message' echoes a reason-phrased line for a session the
-user is looking at; nil is glyph-only."
+`refetch' refills the shown reply in `*dsh-bridge-output*' when the
+completing session is the one it shows (without stealing focus) and
+refreshes the reply-position count; `message' echoes a reason-phrased
+line for a session the user is looking at; nil is glyph-only."
   :type '(choice (const :tag "Refill the shown reply" refetch)
 				 (const :tag "Echo a message" message)
 				 (const :tag "Status glyph only" nil))
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-prompt-resend-confirm t
-  "Whether `C-c C-c' in the prompt buffer confirms an identical re-send.
-When the prompt text exactly matches the text last sent to the buffer's
-effective session, ask before sending again — the guard that stands between
-you and an accidental double-send after `C-c C-c' buries the (unmodified)
-buffer.	 Editing one character suppresses the prompt; `C-c C-d' (draft) is
-never guarded."
+  "Whether \\`C-c C-c' in the DSH-Prompt buffer guards against repeats.
+If non-nil, when \\`C-c C-c' (`dsh-bridge-send-and-exit') is called with
+the prompt text exactly matching the text last sent to the DSH session,
+ask for confirmation first.
+
+This option does not affect \\`C-c C-d' (`dsh-bridge-draft')."
   :type 'boolean
   :group 'dsh-bridge)
 
 (defvar dsh-bridge-default-session nil
-  "The bridge's default target session id, or nil for the last-active session.
-Set with `dsh-bridge-set-default-target' (or `t' in the sessions list).
-Context-free operations — those whose buffer has no session of its own, see
-`dsh-bridge--effective-session' — use this; clearing it falls back to the
-host's last-active session.	 This is the only bridge-wide store; it is
-Emacs-session-local.")
+  "The DSH bridge's default target session ID, if any.
+Set with `dsh-bridge-set-default-target', or \\`t' in the DSH-Sessions
+buffer.  The target session is used by context-free DSH commands (see
+`dsh-bridge--effective-session'); if nil, these commands try to fall
+back to the last-active session.")
 
 (defvar-local dsh-bridge--prompt-session nil
-  "Session id the prompt buffer is bound to, or nil to follow the default
-target.	 Set by `dsh-bridge-open-session', `dsh-bridge-reply', and
-`dsh-bridge-set-buffer-session'.")
+  "Session ID for the DSH-Prompt buffer.
+If nil, follow the default target.")
 
 (defvar dsh-bridge--last-resolved-active nil
   "Cons (ID . LABEL) of the last-active session resolved by the host on a
@@ -285,7 +285,7 @@ faces."
 						  ('running '("🟡" . dsh-bridge-status-running-face))
 						  (_ '("⚪" . dsh-bridge-status-unknown-face))))
 					   (_ (pcase state
-							('idle '("·" . dsh-bridge-status-idle-face))
+							('idle '("✓" . dsh-bridge-status-idle-face))
 							('running '("…" . dsh-bridge-status-running-face))
 							(_ '("?" . dsh-bridge-status-unknown-face)))))))
 	  (propertize (car char-face) 'face (cdr char-face)))))
