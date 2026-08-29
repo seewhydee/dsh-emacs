@@ -201,12 +201,14 @@ most markdown editing commands are also available.
 The DSH plugin adds a "Send to Emacs" button that lets you push
 specific assistant messages to Emacs.
 
-With `dsh-bridge-notifications` non-nil (the default), Emacs
-subscribes to the bridge's event stream and automatically updates the
-DSH-View buffer.  If you disable this option, you can use `i` in the
-DSH-View buffer (or run `M-x dsh-bridge-receive`) to pull the latest
-message pushed by DSH.  Receiving selects the DSH-View buffer unless
-`dsh-bridge-receive-pop` is nil.
+Emacs subscribes to the bridge's event stream automatically on first
+bridge use, and that stream feeds the live session status, the
+sessions-list auto-refresh, and the DSH-View buffer's push from the
+"Send to Emacs" button.  You can use `i` in the DSH-View buffer (or run
+`M-x dsh-bridge-receive`) to pull the latest pushed message yourself, or
+run `M-x dsh-bridge-notifications-stop` to pause the stream for the
+session (latched until `M-x dsh-bridge-notifications-start`).  Receiving
+selects the DSH-View buffer unless `dsh-bridge-receive-pop` is nil.
 
 ## Permissions, authentication, and failure bounds
 

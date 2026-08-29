@@ -70,8 +70,10 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
 - Session selection is Emacs-side: a default target session plus per-buffer
   session bindings; commands fall back to last-active.
 - SSE notification consumer (`make-network-process`, chunked decoding,
-  reconnect with retry) that auto-receives outbox pushes into the view buffer;
-  `dsh-bridge-notifications` to disable, `dsh-bridge-receive` to pull manually.
+  reconnect with retry) that auto-receives outbox pushes into the view buffer
+  and also feeds the live status tracker and sessions-list auto-refresh;
+  `dsh-bridge-notifications-stop` (latched) to pause the stream,
+  `dsh-bridge-receive` to pull manually.
 - HTTP via `url-retrieve` + `json.el`, bearer token read from the token file.
 - `dsh-bridge-install-plugin`: installs the bundled plugin build into a DSH
   profile (`dsh-bridge-profile`, default `web`) via `dsh plugin add file:...`.
