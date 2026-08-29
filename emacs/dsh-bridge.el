@@ -2624,7 +2624,7 @@ cold sessions alike."
 	(if (null id)
 		(message "dsh-bridge: no session under point")
 	  (let ((label (dsh-bridge--label-for-id id)))
-		(if (not (y-or-n-p (format "Archive session %s?	 (One-way: DSH has no unarchive.) " label)))
+		(if (not (y-or-n-p (format "Archive session %s?" label)))
 			(message "dsh-bridge: aborted")
 		  (let* ((result (dsh-bridge--request "POST" "/sessions/archive"
 											  (list (cons 'sessionId id))))
