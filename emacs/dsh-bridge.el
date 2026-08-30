@@ -258,34 +258,33 @@ session that is no longer listed in SESSIONS is dropped."
 
 (defun dsh-bridge--status-state (session-id)
   "Return SESSION-ID's display status: `running', `idle', or `unknown'.
-Saved (cold) sessions are always `unknown', since no live agent reports a
-status for them.  Otherwise the result is the tracker entry
-(`dsh-bridge--session-status'), then the cached row's `running' flag, and
-finally `unknown'.  No active retrieval is done."
+Saved (cold) sessions are always `unknown'; for others, the result is
+obtained by trying to look up the cached `dsh-bridge--session-status',
+then the cached session data's `running' flag, and finally falling back
+on `unknown'.  No active retrieval is done."
   (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
-    (if (and row (not (alist-get 'live row)))
-        'unknown
-      (or (and session-id
-               (cdr (assoc session-id dsh-bridge--session-status)))
-          (and row (if (alist-get 'running row) 'running 'idle))
-          'unknown))))
+	(or (and row (not (alist-get 'live row)) 'unknown)
+		(and session-id
+             (cdr (assoc session-id dsh-bridge--session-status)))
+        (and row (if (alist-get 'running row) 'running 'idle))
+        'unknown)))
 
 (defun dsh-bridge--status-glyph (session-id)
-  "The status indicator for SESSION-ID as a propertized string.
-The glyph reflects SESSION-ID's display status (see `dsh-bridge--status-state')
-in the style of `dsh-bridge-status-indicator' (`emoji', `geometric', or
-`text'), with the matching status face; the empty string when `none'."
+  "Return a status indicator for SESSION-ID as a propertized string.
+The choice of string contents is based on `dsh-bridge--status-state'."
   (if (eq dsh-bridge-status-indicator 'none)
       ""
     (let* ((state (dsh-bridge--status-state session-id))
-           (char (pcase dsh-bridge-status-indicator
-                   ('geometric (pcase state ('idle "●")  ('running "●")  (_ "?")))
-                   ('emoji     (pcase state ('idle "🟢") ('running "🟡") (_ "⚪")))
-                   (_          (pcase state ('idle "✓")  ('running "…")  (_ "?")))))
-           (face (pcase state
-                   ('idle    'dsh-bridge-status-idle-face)
-                   ('running 'dsh-bridge-status-running-face)
-                   (_        'dsh-bridge-status-unknown-face))))
+           (char
+			(pcase dsh-bridge-status-indicator
+              ('geometric (pcase state ('idle "●")  ('running "●")  (_ "?")))
+              ('emoji (pcase state ('idle "🟢") ('running "🟡") (_ "⚪")))
+              (_ (pcase state ('idle "✓")  ('running "…")  (_ "?")))))
+           (face
+			(pcase state
+              ('idle    'dsh-bridge-status-idle-face)
+              ('running 'dsh-bridge-status-running-face)
+              (_        'dsh-bridge-status-unknown-face))))
       (propertize char 'face face))))
 
 ;;; Plugin management
