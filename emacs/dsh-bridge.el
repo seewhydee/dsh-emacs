@@ -317,12 +317,6 @@ The choice of string contents is based on `dsh-bridge--status-state'."
 				 (const :tag "Never offer" nil))
   :group 'dsh-bridge)
 
-(defvar dsh-bridge--dsh-command-cache nil
-  "Memoized auto-detection result of `dsh-bridge--dsh-command', or nil.
-Only successful detections are cached; a nil result is retried on the next
-call, so installing a CLI mid-session needs no restart.	 Setting
-`dsh-bridge-dsh-command' clears the cache.")
-
 (defcustom dsh-bridge-dsh-command nil
   "How the `dsh' process is invoked.
 This variable is used only when installing (or uninstalling) the DSH
@@ -330,7 +324,7 @@ plugin.  Its value can be one of the following:
 
 - nil (the default) does auto-detection.  The first available of these
   is used: `dsh' on PATH, the npm global bin directory, or
-  `npx --yes @deepseek-ai/dsh'.  The result is memoized per session.
+  `npx --yes @deepseek-ai/dsh'.
 
 - A single shell-style command, which is first processed with
   `split-string-and-unquote' (which handles quotes and backslashes, but
@@ -341,43 +335,37 @@ plugin.  Its value can be one of the following:
   :type '(choice (const :tag "Auto-detect" nil)
 				 (string :tag "Command line (split shell-style)")
 				 (repeat :tag "Argv list (verbatim)" string))
-  :set (lambda (sym val)
-		 (set-default sym val)
-		 (setq dsh-bridge--dsh-command-cache nil))
   :group 'dsh-bridge)
 
-(defun dsh-bridge--detect-dsh-command ()
-  "Auto-detect the `dsh' CLI argv: PATH, then the npm global bin, then npx."
-  (or (and (executable-find "dsh") (list "dsh"))
-	  (let ((npm (executable-find "npm")))
-		(and npm
-			 (let ((prefix (ignore-errors (car (process-lines npm "prefix" "-g")))))
-			   (and (not (string-empty-p (or prefix "")))
-					(let ((candidates
-						   (mapcar (lambda (file) (expand-file-name file prefix))
-								   '("bin/dsh" "bin/dsh.cmd"
-									 "Scripts/dsh" "Scripts/dsh.cmd"
-									 "node_modules/.bin/dsh.cmd"))))
-					  (seq-some (lambda (file)
-								  (and (file-executable-p file) (list file)))
-								candidates))))))
-	  (and (executable-find "npx") (list "npx" "--yes" "@deepseek-ai/dsh"))))
+(defun dsh-bridge--detect-npm-launcher ()
+  "Helper function to auto-detect an npm command for launching DSH."
+  (let ((npm (executable-find "npm"))
+		prefix)
+	(and npm
+		 (setq prefix (ignore-errors (car (process-lines npm "prefix" "-g"))))
+		 (not (string-empty-p prefix))
+		 (seq-some (lambda (f) (if (file-executable-p f) (list f)))
+				   ;; Candidate executables in npm's prefix dir
+				   (mapcar (lambda (file) (expand-file-name file prefix))
+						   '("bin/dsh" "bin/dsh.cmd"
+							 "Scripts/dsh" "Scripts/dsh.cmd"
+							 "node_modules/.bin/dsh.cmd"))))))
 
 (defun dsh-bridge--dsh-command ()
-  "The argv of the `dsh' CLI, or nil if none is available.
-Honors `dsh-bridge-dsh-command' (a string is split shell-style with
-`split-string-and-unquote'; a list is a verbatim argv); otherwise
-auto-detects, in order: `dsh' on PATH, the npm global bin directory, and
-`npx --yes @deepseek-ai/dsh'.  Auto-detection is memoized per session: a
-successful result is reused without respawning npm, so loading this
-package costs at most one probe."
-  (or (and dsh-bridge-dsh-command
-		   (if (stringp dsh-bridge-dsh-command)
-			   (split-string-and-unquote dsh-bridge-dsh-command)
-			 dsh-bridge-dsh-command))
-	  (or dsh-bridge--dsh-command-cache
-		  (setq dsh-bridge--dsh-command-cache
-				(dsh-bridge--detect-dsh-command)))))
+  "Return the installed DSH program, or nil if none is available.
+This should be a list of strings, the first being the main command and
+the rest consisting of program arguments.
+
+If `dsh-bridge-dsh-command' is non-nil, use that; otherwise try to
+auto-detect, in order, (i) `dsh' on PATH, (ii) the npm global bin
+directory, and (iii) `npx --yes @deepseek-ai/dsh'."
+  (cond (dsh-bridge-dsh-command
+		 (if (stringp dsh-bridge-dsh-command)
+			 (split-string-and-unquote dsh-bridge-dsh-command)
+		   dsh-bridge-dsh-command))
+		((executable-find "dsh") '("dsh"))
+		((dsh-bridge--detect-npm-launcher))
+		((executable-find "npx") '("npx" "--yes" "@deepseek-ai/dsh"))))
 
 (defun dsh-bridge--profile-manifest ()
   "Path of the profile's package.json manifest."

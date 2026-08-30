@@ -1461,7 +1461,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
       (dsh-bridge--plugin-state-probe)
       (dsh-bridge--plugin-state-probe)
       (should (= calls 1)))
-    (dsh-bridge--plugin-state-invalidate)
+    (dsh-bridge--note-request-failure)
     (cl-letf (((symbol-function 'url-retrieve-synchronously)
                (lambda (&rest _)
                  (setq calls (1+ calls))
@@ -1528,14 +1528,12 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
 (ert-deftest dsh-bridge-dsh-command-auto-detect ()
   "Auto-detection falls back PATH -> npm global bin -> npx."
   ;; dsh on PATH wins.
-  (let ((dsh-bridge-dsh-command nil)
-        (dsh-bridge--dsh-command-cache nil))
+  (let ((dsh-bridge-dsh-command nil))
     (cl-letf (((symbol-function 'executable-find)
                (lambda (prog) (and (equal prog "dsh") "dsh"))))
       (should (equal (dsh-bridge--dsh-command) '("dsh")))))
   ;; npm global bin is found when dsh isn't on PATH.
-  (let ((dsh-bridge-dsh-command nil)
-        (dsh-bridge--dsh-command-cache nil))
+  (let ((dsh-bridge-dsh-command nil))
     (cl-letf (((symbol-function 'executable-find)
                (lambda (prog) (and (equal prog "npm") "npm")))
               ((symbol-function 'process-lines)
@@ -1544,14 +1542,12 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
                (lambda (file) (string-suffix-p "bin/dsh" file))))
       (should (equal (dsh-bridge--dsh-command) '("/fake/prefix/bin/dsh")))))
   ;; Neither dsh nor a global bin: npx fallback.
-  (let ((dsh-bridge-dsh-command nil)
-        (dsh-bridge--dsh-command-cache nil))
+  (let ((dsh-bridge-dsh-command nil))
     (cl-letf (((symbol-function 'executable-find)
                (lambda (prog) (and (equal prog "npx") "npx"))))
       (should (equal (dsh-bridge--dsh-command) '("npx" "--yes" "@deepseek-ai/dsh")))))
   ;; Nothing available.
-  (let ((dsh-bridge-dsh-command nil)
-        (dsh-bridge--dsh-command-cache nil))
+  (let ((dsh-bridge-dsh-command nil))
     (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
       (should (null (dsh-bridge--dsh-command))))))
 
@@ -1790,32 +1786,11 @@ Exit statuses are integers and 1 is truthy, so this guards the `zerop'."
               ((symbol-function 'message) (lambda (&rest _) nil)))
       (should-error (dsh-bridge-uninstall-plugin) :type 'user-error))))
 
-(ert-deftest dsh-bridge-dsh-command-memoized ()
-  "Auto-detection is memoized on success and retried on failure."
-  (let ((dsh-bridge-dsh-command nil)
-        (dsh-bridge--dsh-command-cache nil)
-        (calls 0))
-    (cl-letf (((symbol-function 'dsh-bridge--detect-dsh-command)
-               (lambda () (setq calls (1+ calls)) '("dsh"))))
-      (should (equal (dsh-bridge--dsh-command) '("dsh")))
-      (should (equal (dsh-bridge--dsh-command) '("dsh")))
-      (should (= calls 1))))
-  ;; A nil detection is not cached: the next call retries, so a CLI
-  ;; installed mid-session is picked up without a restart.
-  (let ((dsh-bridge-dsh-command nil)
-        (dsh-bridge--dsh-command-cache nil)
-        (calls 0))
-    (cl-letf (((symbol-function 'dsh-bridge--detect-dsh-command)
-               (lambda () (setq calls (1+ calls)) nil)))
-      (should (null (dsh-bridge--dsh-command)))
-      (should (null (dsh-bridge--dsh-command)))
-      (should (= calls 2)))))
-
 (ert-deftest dsh-bridge-first-load-notice-skips-cli-when-installed ()
   "An installed plugin short-circuits the notice before CLI auto-detection."
   (let ((dsh-bridge--first-load-notice-done nil) (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--plugin-installed-p) (lambda () t))
-              ((symbol-function 'dsh-bridge--dsh-available-p)
+              ((symbol-function 'dsh-bridge--dsh-command)
                (lambda () (error "must not be called")))
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
