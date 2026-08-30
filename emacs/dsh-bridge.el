@@ -241,13 +241,6 @@ notification stream.")
   (when (and session-id (memq state '(running idle)))
 	(push (cons session-id state) dsh-bridge--session-status)))
 
-(defun dsh-bridge--status-drop (session-id)
-  "Forget SESSION-ID's tracked status.
-This is called by `dsh-bridge--turn-complete-refetch' if it encounters
-an error when fetching data on the session"
-  (setq dsh-bridge--session-status
-		(assoc-delete-all session-id dsh-bridge--session-status)))
-
 (defun dsh-bridge--seed-status (sessions)
   "Seed the DSH session status tracker from a fresh SESSIONS list.
 Every listed session's `running' flag becomes its live status; any
@@ -2929,7 +2922,9 @@ status entry on a 404 (the session died)."
 			 (err (dsh-bridge--error-message status http-status alist)))
 		(if err
 			(when (eq http-status 404)
-			  (dsh-bridge--status-drop session-id))
+			  ;; Forget SESSION-ID's tracked status.
+			  (setq dsh-bridge--session-status
+					(assoc-delete-all session-id dsh-bridge--session-status)))
 		  (let ((shown-id (or (alist-get 'sessionId alist) session-id)))
 			;; Only refill if the output buffer still shows this session and
 			;; the user has not started reply-cycling since the event (the
