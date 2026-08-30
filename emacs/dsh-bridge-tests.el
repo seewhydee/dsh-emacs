@@ -555,7 +555,8 @@ binds the compose keys plus fetch/set-session/list."
                                 (dsh-bridge--prompt-header-line)))))
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
-            (dsh-bridge--last-resolved-active nil))
+            (dsh-bridge--last-resolved-active nil)
+            (dsh-bridge-status-indicator 'geometric))
         (dsh-bridge-prompt-mode)
         ;; Nothing bound and nothing resolved: the header shows only the status.
         (should (string-match-p "●" (dsh-bridge--prompt-header-line)))
@@ -1071,7 +1072,8 @@ untouched."
   "The session list shows marker/S/Session/Age/Workspace columns."
   (when (get-buffer "*dsh-bridge-sessions*")
     (kill-buffer "*dsh-bridge-sessions*"))
-  (let ((dsh-bridge-default-session "live-1"))
+  (let ((dsh-bridge-default-session "live-1")
+        (dsh-bridge-status-indicator 'geometric))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
                  '(((id . "live-1") (live . t) (running . t) (title . "First live")
@@ -1115,6 +1117,31 @@ untouched."
         ;; Workspace (index 4) is the workspace title, else the cwd basename.
         (should (equal (aref live-cells 4) "WS A"))
         (should (equal (aref saved-cells 4) "b"))))))
+
+(ert-deftest dsh-bridge-list-sessions-emoji-status-column ()
+  "Under the `emoji' indicator the status column is two columns wide.
+Emoji glyphs are double-width; in a one-column cell
+`tabulated-list-print-col' would cover the glyph with an ellipsis
+`display' property, so the row must print it unelided."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((dsh-bridge-default-session nil)
+        (dsh-bridge-status-indicator 'emoji))
+    (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
+               (lambda ()
+                 '(((id . "live-1") (live . t) (running . nil) (title . "First live")
+                    (lastActive . 1700000000000) (workspace . "WS A")))))
+              ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
+      (dsh-bridge-list-sessions))
+    (let ((buf (get-buffer "*dsh-bridge-sessions*")))
+      (should buf)
+      (should (= (nth 1 (aref (buffer-local-value 'tabulated-list-format buf) 1))
+                 2))
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (should (search-forward "🟢" nil t))
+        ;; The printed glyph must not be hidden behind an ellipsis display.
+        (should-not (get-text-property (1- (point)) 'display))))))
 
 (ert-deftest dsh-bridge-session-cell-untitled ()
   "The session cell shows the title, or the raw id (untitled face) otherwise."
@@ -1329,12 +1356,13 @@ session as default target."
 (ert-deftest dsh-bridge-status-cell ()
   "The status cell shows the indicator glyph: filled circle for running and
 idle live sessions, `?' for saved (cold) sessions and for rows with no info."
-  (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . t)))
-                   "●"))
-  (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . nil)))
-                   "●"))
-  (should (string= (dsh-bridge--status-cell '((id . "s1") (live . nil))) "?"))
-  (should (string= (dsh-bridge--status-cell '((id . "s1"))) "?")))
+  (let ((dsh-bridge-status-indicator 'geometric))
+    (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . t)))
+                     "●"))
+    (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . nil)))
+                     "●"))
+    (should (string= (dsh-bridge--status-cell '((id . "s1") (live . nil))) "?"))
+    (should (string= (dsh-bridge--status-cell '((id . "s1"))) "?"))))
 
 (ert-deftest dsh-bridge-relative-age ()
   "Ages match DSH's buckets (now/min/h/d/mo/y)."
@@ -1987,7 +2015,7 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge-status-indicator 'text))
     (dsh-bridge--status-set "s1" 'idle)
-    (should (string= (dsh-bridge--status-glyph "s1") "·")))
+    (should (string= (dsh-bridge--status-glyph "s1") "✓")))
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge-status-indicator 'none))

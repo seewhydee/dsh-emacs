@@ -153,6 +153,13 @@ The value should be one of the following:
 				 (const :tag "Geometric glyphs" geometric)
 				 (const :tag "Text" text)
 				 (const :tag "None" none))
+  :set (lambda (sym val)
+		 (set-default sym val)
+		 ;; Re-render open bridge buffers so the new style takes effect
+		 ;; immediately; guarded because this runs at load time, before the
+		 ;; refresh helper below is defined.
+		 (when (fboundp 'dsh-bridge--refresh-status-display)
+		   (dsh-bridge--refresh-status-display)))
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-turn-complete 'refetch
@@ -192,7 +199,7 @@ If nil, follow the default target.")
 request with no explicit session, or nil.  Advisory display cache: never used
 for targeting, never refreshed from a display path.")
 
-;; Forward declaration: the real definition lives with the view-buffer section.
+;; Forward declaration; real definition in view-buffer section below.
 (defvar dsh-bridge--view-content-session)
 
 (defvar dsh-bridge--sessions-cache nil
@@ -2774,18 +2781,10 @@ Returns non-nil when sessions were listed."
 		  ;; the session list from the host.
 		  (setq-local revert-buffer-function
 					  (lambda (&rest _) (dsh-bridge--list-sessions-in-buffer)))
-		  (setq tabulated-list-format
-				(let ((format [("*" 1 t)
-							   ("?" 1 t)
-							   ("Session" 40 t)
-							   ("Age" 8 dsh-bridge--age-sorter)
-							   ("Workspace" 0 t)]))
-				  (if dsh-bridge-show-session-ids
-					  (vconcat format [("Id" 40 t)])
-					format)))
+		  (setq tabulated-list-format (dsh-bridge--sessions-format))
 		  (setq tabulated-list-sort-key '("Age" . t))
 		  (setq tabulated-list-entries
-				(mapcar (lambda (s) (dsh-bridge--session-entry s)) visible))
+				(mapcar #'dsh-bridge--session-entry visible))
 		  (tabulated-list-init-header)
 		  ;; REMEMBER-POS: entry ids are session ids, so an auto-refresh or
 		  ;; post-mutation reprint keeps point on the same session's row.
@@ -2798,6 +2797,44 @@ Returns non-nil when sessions were listed."
 	(with-current-buffer "*dsh-bridge-sessions*"
 	  (when (eq major-mode 'dsh-bridge-sessions-mode)
 		(dsh-bridge--list-sessions-in-buffer)))))
+
+(defun dsh-bridge--sessions-format ()
+  "The `tabulated-list-format' for the sessions buffer.
+The status column is two columns wide under the `emoji' indicator: emoji
+glyphs are double-width, and in a one-column cell `tabulated-list-print-col'
+would cover the glyph with an ellipsis `display' property."
+  (let ((format (vector (list "*" 1 t)
+						(list "?" (if (eq dsh-bridge-status-indicator 'emoji) 2 1) t)
+						(list "Session" 40 t)
+						(list "Age" 8 'dsh-bridge--age-sorter)
+						(list "Workspace" 0 t))))
+	(if dsh-bridge-show-session-ids
+		(vconcat format [("Id" 40 t)])
+	  format)))
+
+(defun dsh-bridge--sessions-entries ()
+  "`tabulated-list-entries' for the current sessions cache.
+Reads `dsh-bridge--sessions-cache' only, without contacting the host, so it is
+safe for a display refresh (e.g. after `dsh-bridge-status-indicator' changes)."
+  (mapcar #'dsh-bridge--session-entry
+		  (seq-filter #'dsh-bridge--session-visible-p dsh-bridge--sessions-cache)))
+
+(defun dsh-bridge--refresh-status-display ()
+  "Re-render status indicators in open bridge buffers.
+The `:set' action of `dsh-bridge-status-indicator': changing the indicator
+style updates an open DSH-Sessions list and the DSH-View header immediately
+(the DSH-Prompt header is `(:eval ...)' and re-renders on redisplay).  Reads
+the sessions cache only; never hits the host."
+  (dsh-bridge--refresh-view-headers)
+  (when (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
+	(with-current-buffer "*dsh-bridge-sessions*"
+	  (when (eq major-mode 'dsh-bridge-sessions-mode)
+		;; The status column's width depends on the indicator style, so the
+		;; format (and its rendered header) must be recomputed too.
+		(setq tabulated-list-format (dsh-bridge--sessions-format))
+		(tabulated-list-init-header)
+		(setq tabulated-list-entries (dsh-bridge--sessions-entries))
+		(tabulated-list-print t)))))
 
 ;;; Turn events and status re-rendering
 
