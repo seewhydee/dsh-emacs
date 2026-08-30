@@ -195,9 +195,15 @@ back to the last-active session.")
 If nil, follow the default target.")
 
 (defvar dsh-bridge--last-resolved-active nil
-  "Cons (ID . LABEL) of the last-active session resolved by the host on a
-request with no explicit session, or nil.  Advisory display cache: never used
-for targeting, never refreshed from a display path.")
+  "Cons (ID . LABEL) of the last-active DSH session, or nil.
+This is a cache for rendering last-active label and status indicators.
+
+ID is the session id that the running DeepSeek Harness (DSH) process
+resolved as last-active for a request without an explicit session.
+
+LABEL is the corresponding display label, taken from the response's
+`title' when present and from `dsh-bridge--label-for-id' otherwise.
+Its value may be nil if the request is still incomplete.")
 
 ;; Forward declaration; real definition in view-buffer section below.
 (defvar dsh-bridge--view-content-session)
@@ -222,36 +228,30 @@ created and toggled by `v'.")
 
 ;;; Session status tracker
 
-;; The live status of targetable sessions drives the header glyph and the
-;; sessions-list running cell.	Seeded from `/sessions` rows and falls back to
-;; the row's `running' when the tracker has no entry; updated live by the
-;; `turn-start`/`turn-complete` frames on the notification stream.
 (defvar dsh-bridge--session-status nil
   "Alist of (SESSION-ID . running|idle) live session status, or nil.
-A session absent from this alist is unknown (its status lies in the
-`/sessions' cache or is genuinely unobserved).	Updated by the notification
-stream and by `dsh-bridge--seed-status'; dropped when a session dies.")
+This variable is seeded from the sessions list managed by the DSH
+plugin, and then updated based on turn-start/turn-complete frames in the
+notification stream.")
 
 (defun dsh-bridge--status-set (session-id state)
-  "Record SESSION-ID's live status as STATE (`running' or `idle')."
+  "Record SESSION-ID's status as STATE (`running' or `idle')."
   (setq dsh-bridge--session-status
 		(assoc-delete-all session-id dsh-bridge--session-status))
   (when (and session-id (memq state '(running idle)))
 	(push (cons session-id state) dsh-bridge--session-status)))
 
 (defun dsh-bridge--status-drop (session-id)
-  "Forget SESSION-ID's tracked status (it is no longer targetable)."
+  "Forget SESSION-ID's tracked status.
+This is called by `dsh-bridge--turn-complete-refetch' if it encounters
+an error when fetching data on the session"
   (setq dsh-bridge--session-status
 		(assoc-delete-all session-id dsh-bridge--session-status)))
 
-(defun dsh-bridge--status-for (session-id)
-  "The tracked status of SESSION-ID, or nil when unknown."
-  (and session-id (cdr (assoc session-id dsh-bridge--session-status))))
-
 (defun dsh-bridge--seed-status (sessions)
-  "Seed the status tracker from a fresh SESSIONS list (row alists).
-Every row's `running' flag becomes its live status; sessions no longer in the
-inventory are dropped (they died)."
+  "Seed the DSH session status tracker from a fresh SESSIONS list.
+Every listed session's `running' flag becomes its live status; any
+session that is no longer listed in SESSIONS is dropped."
   (let ((seen '()))
 	(dolist (session sessions)
 	  (let ((id (alist-get 'id session)))
@@ -268,7 +268,7 @@ inventory are dropped (they died)."
 The tracker, then a `/sessions` row's `running' flag (a whole-list seed), then
 `unknown'.	Pure cache read: safe for a header/display path."
   (or (and session-id
-		   (dsh-bridge--status-for session-id))
+		   (cdr (assoc session-id dsh-bridge--session-status)))
 	  (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
 		(and row (if (alist-get 'running row) 'running 'idle)))
 	  'unknown))
