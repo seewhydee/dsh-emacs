@@ -1076,11 +1076,14 @@ untouched."
         (dsh-bridge-status-indicator 'geometric))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
-                 '(((id . "live-1") (live . t) (running . t) (title . "First live")
-                    (cwd . "/a") (lastActive . 1700000000000)
-                    (workspace . "WS A") (workspaceId . "w1"))
-                   ((id . "saved-1") (live . nil) (title . "A saved one") (cwd . "/b")
-                    (createdAt . 1690000000000)))))
+                 (let ((sessions
+                        '(((id . "live-1") (live . t) (running . t) (title . "First live")
+                           (cwd . "/a") (lastActive . 1700000000000)
+                           (workspace . "WS A") (workspaceId . "w1"))
+                          ((id . "saved-1") (live . nil) (title . "A saved one") (cwd . "/b")
+                           (createdAt . 1690000000000)))))
+                   (setq dsh-bridge--sessions-cache sessions)
+                   sessions)))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
@@ -1129,8 +1132,11 @@ Emoji glyphs are double-width; in a one-column cell
         (dsh-bridge-status-indicator 'emoji))
     (cl-letf (((symbol-function 'dsh-bridge--fetch-sessions)
                (lambda ()
-                 '(((id . "live-1") (live . t) (running . nil) (title . "First live")
-                    (lastActive . 1700000000000) (workspace . "WS A")))))
+                 (let ((sessions
+                        '(((id . "live-1") (live . t) (running . nil) (title . "First live")
+                           (lastActive . 1700000000000) (workspace . "WS A")))))
+                   (setq dsh-bridge--sessions-cache sessions)
+                   sessions)))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) nil)))
       (dsh-bridge-list-sessions))
     (let ((buf (get-buffer "*dsh-bridge-sessions*")))
@@ -1353,16 +1359,19 @@ session as default target."
     (should-not (assoc "/sessions/create"
                        (mapcar (lambda (c) (list (cadr c) c)) called)))))
 
-(ert-deftest dsh-bridge-status-cell ()
-  "The status cell shows the indicator glyph: filled circle for running and
-idle live sessions, `?' for saved (cold) sessions and for rows with no info."
-  (let ((dsh-bridge-status-indicator 'geometric))
-    (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . t)))
-                     "●"))
-    (should (string= (dsh-bridge--status-cell '((id . "s1") (live . t) (running . nil)))
-                     "●"))
-    (should (string= (dsh-bridge--status-cell '((id . "s1") (live . nil))) "?"))
-    (should (string= (dsh-bridge--status-cell '((id . "s1"))) "?"))))
+(ert-deftest dsh-bridge-status-glyph-session-states ()
+  "The status glyph reflects the session state: filled circle for running and
+idle live sessions, `?' for saved (cold) sessions and for unknown ids."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache
+         '(((id . "s-run") (live . t) (running . t))
+           ((id . "s-idle") (live . t) (running . nil))
+           ((id . "s-cold") (live . nil))))
+        (dsh-bridge-status-indicator 'geometric))
+    (should (string= (dsh-bridge--status-glyph "s-run") "●"))
+    (should (string= (dsh-bridge--status-glyph "s-idle") "●"))
+    (should (string= (dsh-bridge--status-glyph "s-cold") "?"))
+    (should (string= (dsh-bridge--status-glyph "s-unknown") "?"))))
 
 (ert-deftest dsh-bridge-relative-age ()
   "Ages match DSH's buckets (now/min/h/d/mo/y)."
@@ -1970,7 +1979,7 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
 ;;; Turn notifications, session status, and the header line
 
 (ert-deftest dsh-bridge-status-tracker ()
-  "status-set/seed/drop drive status-state, with an unknown fallback."
+  "status-set/seed drive status-state, with an unknown fallback."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache nil))
     (should (eq (dsh-bridge--status-state "s1") 'unknown))
@@ -1978,7 +1987,8 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
     (should (eq (dsh-bridge--status-state "s1") 'running))
     (dsh-bridge--status-set "s1" 'idle)
     (should (eq (dsh-bridge--status-state "s1") 'idle))
-    (dsh-bridge--status-drop "s1")
+    ;; Seeding an empty list drops all tracked sessions.
+    (dsh-bridge--seed-status nil)
     (should (eq (dsh-bridge--status-state "s1") 'unknown))
     ;; Seeding from a /sessions list sets running and drops dead sessions.
     (dsh-bridge--seed-status '(((id . "a") (running . t))
@@ -1995,10 +2005,10 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
         (dsh-bridge--sessions-cache nil))
     (should (eq (dsh-bridge--status-state "s1") 'unknown)))
   (let ((dsh-bridge--session-status nil)
-        (dsh-bridge--sessions-cache '(((id . "s1") (running . t)))))
+        (dsh-bridge--sessions-cache '(((id . "s1") (live . t) (running . t)))))
     (should (eq (dsh-bridge--status-state "s1") 'running)))
   (let ((dsh-bridge--session-status nil)
-        (dsh-bridge--sessions-cache '(((id . "s1") (running . nil)))))
+        (dsh-bridge--sessions-cache '(((id . "s1") (live . t) (running . nil)))))
     (should (eq (dsh-bridge--status-state "s1") 'idle))))
 
 (ert-deftest dsh-bridge-status-glyph ()

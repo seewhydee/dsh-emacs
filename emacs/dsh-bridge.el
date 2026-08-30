@@ -257,43 +257,36 @@ session that is no longer listed in SESSIONS is dropped."
 					  dsh-bridge--session-status))))
 
 (defun dsh-bridge--status-state (session-id)
-  "Resolve SESSION-ID's display status: `running', `idle', or `unknown'.
-The tracker, then a `/sessions` row's `running' flag (a whole-list seed), then
-`unknown'.	Pure cache read: safe for a header/display path."
-  (or (and session-id
-		   (cdr (assoc session-id dsh-bridge--session-status)))
-	  (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
-		(and row (if (alist-get 'running row) 'running 'idle)))
-	  'unknown))
-
-(defun dsh-bridge--status-glyph-for-state (state)
-  "The status indicator for STATE (`idle', `running', or `unknown') as a
-propertized string.	 Honors `dsh-bridge-status-indicator'; empty string when
-`none'.	 The glyph char is colored via its status face on frames that display
-faces."
-  (if (eq dsh-bridge-status-indicator 'none)
-	  ""
-	(let ((char-face (pcase dsh-bridge-status-indicator
-					   ('geometric
-						(pcase state
-						  ('idle '("●" . dsh-bridge-status-idle-face))
-						  ('running '("●" . dsh-bridge-status-running-face))
-						  (_ '("?" . dsh-bridge-status-unknown-face))))
-					   ('emoji
-						(pcase state
-						  ('idle '("🟢" . dsh-bridge-status-idle-face))
-						  ('running '("🟡" . dsh-bridge-status-running-face))
-						  (_ '("⚪" . dsh-bridge-status-unknown-face))))
-					   (_ (pcase state
-							('idle '("✓" . dsh-bridge-status-idle-face))
-							('running '("…" . dsh-bridge-status-running-face))
-							(_ '("?" . dsh-bridge-status-unknown-face)))))))
-	  (propertize (car char-face) 'face (cdr char-face)))))
+  "Return SESSION-ID's display status: `running', `idle', or `unknown'.
+Saved (cold) sessions are always `unknown', since no live agent reports a
+status for them.  Otherwise the result is the tracker entry
+(`dsh-bridge--session-status'), then the cached row's `running' flag, and
+finally `unknown'.  No active retrieval is done."
+  (let ((row (and session-id (dsh-bridge--session-for-id session-id))))
+    (if (and row (not (alist-get 'live row)))
+        'unknown
+      (or (and session-id
+               (cdr (assoc session-id dsh-bridge--session-status)))
+          (and row (if (alist-get 'running row) 'running 'idle))
+          'unknown))))
 
 (defun dsh-bridge--status-glyph (session-id)
   "The status indicator for SESSION-ID as a propertized string.
-Honors `dsh-bridge-status-indicator'; empty string when `none'."
-  (dsh-bridge--status-glyph-for-state (dsh-bridge--status-state session-id)))
+The glyph reflects SESSION-ID's display status (see `dsh-bridge--status-state')
+in the style of `dsh-bridge-status-indicator' (`emoji', `geometric', or
+`text'), with the matching status face; the empty string when `none'."
+  (if (eq dsh-bridge-status-indicator 'none)
+      ""
+    (let* ((state (dsh-bridge--status-state session-id))
+           (char (pcase dsh-bridge-status-indicator
+                   ('geometric (pcase state ('idle "●")  ('running "●")  (_ "?")))
+                   ('emoji     (pcase state ('idle "🟢") ('running "🟡") (_ "⚪")))
+                   (_          (pcase state ('idle "✓")  ('running "…")  (_ "?")))))
+           (face (pcase state
+                   ('idle    'dsh-bridge-status-idle-face)
+                   ('running 'dsh-bridge-status-running-face)
+                   (_        'dsh-bridge-status-unknown-face))))
+      (propertize char 'face face))))
 
 ;;; Plugin management
 
@@ -2368,22 +2361,6 @@ target, else a space."
 	  (propertize "*" 'face 'dsh-bridge-default-target-face)
 	" "))
 
-(defun dsh-bridge--status-cell (session)
-  "Return the status-indicator cell for a sessions-list row SESSION.
-Live sessions show the tracker-resolved state (falling back to the row's own
-`running' flag when the tracker/cache has no opinion); saved (cold) sessions
-show unknown, since no live agent reports a status.	 The glyphs obey
-`dsh-bridge-status-indicator' ('filled circle, green when idle, amber when
-running; `?' for unknown).	Updates live from SSE via the tracker."
-  (let* ((id (alist-get 'id session))
-		 (state (dsh-bridge--status-state id)))
-	(dsh-bridge--status-glyph-for-state
-	 (cond
-	  ((not (alist-get 'live session)) 'unknown)
-	  ((memq state '(running idle)) state)
-	  ((alist-get 'running session) 'running)
-	  (t 'idle)))))
-
 (defun dsh-bridge--session-cell (session)
   "Session name cell for SESSION, with untitled faces."
   (let* ((title (dsh-bridge--session-title session))
@@ -2419,7 +2396,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 							 (propertize workspace 'help-echo cwd)
 						   workspace))
 		 (cols (vector (dsh-bridge--default-target-marker session)
-					   (dsh-bridge--status-cell session)
+					   (dsh-bridge--status-glyph (alist-get 'id session))
 					   (dsh-bridge--session-cell session)
 					   age
 					   workspace-cell)))
