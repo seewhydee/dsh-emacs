@@ -23,33 +23,41 @@
 ;;; Commentary:
 
 ;; This package bridges Emacs and a running DeepSeek Harness (DSH)
-;; session: it moves text from Emacs to DSH and back over loopback
-;; HTTP, so you can compose prompts in Emacs and read DSH's replies
-;; there without copy-paste.
+;; session, moving text from Emacs to DSH and back over loopback HTTP.
+;; This lets you compose prompts and read DSH's replies within Emacs.
 
-;; Must be used with the `dsh-emacs-bridge' plugin installed in DSH.
-;; When this package was installed from the package tar, the plugin is
-;; bundled with it: run `M-x dsh-bridge-install-plugin' to install the
-;; plugin into the DSH profile, then restart "dsh web".
+;; This Emacs package is bundled with a plugin for DSH, which should
+;; be installed with \\`M-x dsh-bridge-install-plugin', before using
+;; any of the other commands.
 
+;; BASIC USAGE:
+;;
 ;; The interactive entry points are:
 ;;
 ;; `dsh-bridge'					  - transient dispatcher
 ;; `dsh-bridge-list-sessions'	  - browse DSH sessions
-;; `dsh-bridge-prompt'			  - open prompt-editing buffer
-;; `dsh-bridge-send'/ -draft	  - send region/buffer as prompt/draft
-;; `dsh-bridge-fetch'			  - pull a session's latest reply
-;; `dsh-bridge-receive'			  - pull latest "Send to Emacs" message
-;; `dsh-bridge-set-default-target'- set/ clear default target session
+;; (consider giving one of both of the above a global keybinding)
 ;;
-;; You may consider giving a global keybinding to `dsh-bridge' and/or
-;; `dsh-bridge-list-sessions'.
-
-;; Relevant buffers:
+;; \\`M-x dsh-bridge' opens a transient menu that prompts for the next
+;; command, with the top line showing the session your next command
+;; will act on.  From here, you can send the region/buffer to DSH as a
+;; prompt or draft prompt, fetch output from the session, etc.
 ;;
-;; `*dsh-bridge-sessions*' - session list (a tabulated list)
-;; `*dsh-bridge-output*'   - a session's assistant text (read-only)
-;; `*dsh-bridge-prompt*'   - prompt-editing buffer
+;; \\`M-x dsh-bridge-list-sessions' opens a buffer with a tabulated
+;; list of DSH sessions.  You can type \\`f' to fetch output, \\`r' to
+;; send reply, etc.
+;;
+;; From the DSH-View buffer, which shows assistant text fetched from
+;; DSH, type \\`r' to open a DSH-Prompt buffer, \\`M-p'/\\`M-n' to
+;; cycle through the session reply history, etc.
+;;
+;; From the DSH-Prompt buffer, you can type out prompts for DSH and
+;; send them with \\`C-c C-c', or send as draft with \\`C-c C-d'.
+;; Type \\`C-c C-f' to open the corresponding DSH-View buffer,
+;; \\`M-p'/\\`M-n' to cycle through the prompt history, etc.
+;;
+;; For other keybindings, refer to the menu bar or elisp docs.
+;; Suggestions for user interface improvements are welcome.
 
 ;;; Code:
 
@@ -226,7 +234,7 @@ session.  The row alist has the following keys:
 Initialized from `dsh-bridge-sessions-show-archived' when the buffer is
 created and toggled by `v'.")
 
-;;; Session status tracker
+;;; Session status tracking
 
 (defvar dsh-bridge--session-status nil
   "Alist of (SESSION-ID . running|idle) live session status, or nil.
@@ -289,13 +297,15 @@ The choice of string contents is based on `dsh-bridge--status-state'."
 
 ;;; Plugin management
 
-;; The bridge plugin (`dsh-emacs-bridge') cannot be hot-swapped: a `dsh web'
-;; restart is always required for it to load or unload, and Emacs packaging
-;; has no install/uninstall hooks, so the install UX is (a) the explicit
-;; `dsh-bridge-install-plugin' / `dsh-bridge-uninstall-plugin' commands and
-;; (b) the first-failure offer in `dsh-bridge--ensure-plugin', which
-;; diagnoses precisely ("dsh web down" vs "plugin not loaded") and offers to
-;; install on first use.
+;; The DSH bridge plugin cannot be hot-swapped, and a harness process
+;; restart is required for it to take effect.  When dsh-emacs-bridge
+;; is installed as an Emacs package, the user is expected to
+;; explicitly run `dsh-bridge-install-plugin' to install the DSH
+;; plugin (Emacs packaging offers no install/uninstall hooks, and we
+;; opt not to abuse autoload magic).  However, we implement the helper
+;; function `dsh-bridge--ensure-plugin', which is called on common
+;; entry-points and detects the presence or absence of DSH and/or the
+;; necessary DSH plugin, including offering to install the plugin.
 
 (defcustom dsh-bridge-install-plugin-offer 'ask
   "When to offer to install the bridge plugin after a failed first use.
