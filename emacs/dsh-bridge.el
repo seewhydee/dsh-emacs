@@ -309,11 +309,10 @@ The choice of string contents is based on `dsh-bridge--status-state'."
 
 (defcustom dsh-bridge-install-plugin-offer 'ask
   "When to offer to install the bridge plugin after a failed first use.
-`ask' (the default) prompts once per Emacs session when a bridge command
-finds the plugin missing; nil never offers (the failure is reported and
-`M-x dsh-bridge-install-plugin' is named).	There is deliberately no
-unattended-install option: a broken install can fail the entire `dsh web'
-boot, so installs are always user-confirmed and validated."
+- `ask' (the default) prompts once per Emacs session when a bridge
+  command finds the plugin missing; saying yes runs
+  `dsh-bridge-install-plugin'.
+- nil never offers."
   :type '(choice (const :tag "Ask once per session" ask)
 				 (const :tag "Never offer" nil))
   :group 'dsh-bridge)
@@ -325,27 +324,20 @@ call, so installing a CLI mid-session needs no restart.	 Setting
 `dsh-bridge-dsh-command' clears the cache.")
 
 (defcustom dsh-bridge-dsh-command nil
-  "How to invoke the `dsh' CLI, or nil to auto-detect.
-A shell-style command line (a string, split at runtime with
-`split-string-and-unquote' — quotes and backslashes are honored, but `~'
-is NOT expanded) or a verbatim argv list (a list of strings: program, then
-fixed arguments).  Examples: \"npx --yes @deepseek-ai/dsh\", \"pnpm dlx
-@deepseek-ai/dsh\", or, for a source checkout, \"pnpm -C
-/path/to/deepseek-harness dsh\" — the checkout's own `pnpm dsh' script,
-which runs the CLI from source with no build step — or its built CLI
-\"node /path/to/deepseek-harness/apps/cli/lib/bin.js\", which needs `pnpm
-build' in the checkout first.
+  "How the `dsh' process is invoked.
+This variable is used only when installing (or uninstalling) the DSH
+plugin.  Its value can be one of the following:
 
-When nil, the first available of these is used: `dsh' on PATH, the npm
-global bin directory, or `npx --yes @deepseek-ai/dsh'.	Auto-detection is
-memoized per session.
+- nil (the default) does auto-detection.  The first available of these
+  is used: `dsh' on PATH, the npm global bin directory, or
+  `npx --yes @deepseek-ai/dsh'.  The result is memoized per session.
 
-The standard DSH install paths do not put `dsh' on PATH — `npx
-@deepseek-ai/dsh web' (npm) and `pnpm dsh web' (source checkout) — so set
-this option when auto-detection does not apply (notably for a source
-checkout).	To smoke-test an invocation by hand, append \"--help\": a bare
-invocation errors with \"--profile <name> is required\" by design.	`dsh
-plugin' additionally requires `pnpm' on PATH."
+- A single shell-style command, which is first processed with
+  `split-string-and-unquote' (which handles quotes and backslashes, but
+  does NOT expand ~).  Example: \"pnpm -C /path/to/deepseek-harness dsh\"
+
+- A list of strings: a command, followed by arguments, all handled
+  verbatim."
   :type '(choice (const :tag "Auto-detect" nil)
 				 (string :tag "Command line (split shell-style)")
 				 (repeat :tag "Argv list (verbatim)" string))
@@ -386,11 +378,6 @@ package costs at most one probe."
 	  (or dsh-bridge--dsh-command-cache
 		  (setq dsh-bridge--dsh-command-cache
 				(dsh-bridge--detect-dsh-command)))))
-
-(defun dsh-bridge--dsh-available-p ()
-  "Whether a `dsh' CLI invocation is available.
-See `dsh-bridge--dsh-command'."
-  (not (null (dsh-bridge--dsh-command))))
 
 (defun dsh-bridge--profile-manifest ()
   "Path of the profile's package.json manifest."
@@ -743,7 +730,7 @@ before telling you to restart \"dsh web\" to load the plugin."
   (let ((dir (dsh-bridge--plugin-directory)))
 	(unless dir
 	  (user-error "No bundled dsh-emacs-bridge plugin found next to dsh-bridge.el; install from the source tree instead (see the README)"))
-	(unless (dsh-bridge--dsh-available-p)
+	(unless (dsh-bridge--dsh-command)
 	  (user-error "No `dsh' CLI available; set `dsh-bridge-dsh-command' or add `dsh' to PATH"))
 	(unless (executable-find "pnpm")
 	  (user-error "The `pnpm' executable was not found on PATH"))
@@ -764,7 +751,7 @@ exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
   (if (not (dsh-bridge--plugin-installed-p))
 	  (message "dsh bridge: the plugin is not installed in the `%s' profile"
 			   dsh-bridge-profile)
-	(unless (dsh-bridge--dsh-available-p)
+	(unless (dsh-bridge--dsh-command)
 	  (user-error "No `dsh' CLI available; set `dsh-bridge-dsh-command' or add `dsh' to PATH"))
 	(unless (executable-find "pnpm")
 	  (user-error "The `pnpm' executable was not found on PATH"))
@@ -796,7 +783,7 @@ CLI auto-detection (which can spawn npm), so an installed plugin costs no
 subprocess at load."
   (when (and (not dsh-bridge--first-load-notice-done)
 			 (not (dsh-bridge--plugin-installed-p))
-			 (dsh-bridge--dsh-available-p))
+			 (dsh-bridge--dsh-command))
 	(setq dsh-bridge--first-load-notice-done t)
 	(message "dsh bridge: the bridge plugin is not installed in the `%s' profile — run `M-x dsh-bridge-install-plugin' to install it"
 			 dsh-bridge-profile)))
