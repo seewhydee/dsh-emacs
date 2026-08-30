@@ -470,10 +470,6 @@ Returns `running', `not-running', `unreachable', or `forbidden'."
 				   ((and (stringp token) (not (string-empty-p token))) 'running)
 				   (t 'not-running))))))))
 
-(defun dsh-bridge--plugin-state-invalidate ()
-  "Drop the cached plugin probe state (force a re-probe)."
-  (setq dsh-bridge--plugin-state nil))
-
 (defun dsh-bridge--note-request-failure ()
   "Drop the probe cache when a real request contradicts it.
 Callers invoke this on a transport failure or a 401/404.  A failure while
@@ -662,7 +658,7 @@ COMPOSED is whether the profile composition validated (`--dump-config')."
 
 (defun dsh-bridge--plugin-install-finished ()
   "Post-install handling for the synchronous path: re-arm, validate, report."
-  (dsh-bridge--plugin-state-invalidate)
+  (setq dsh-bridge--plugin-state nil)
   (dsh-bridge--plugin-diagnosed-reset)
   (dsh-bridge--report-install-result (dsh-bridge--validate-plugin-install)))
 
@@ -693,7 +689,7 @@ rather than blocking Emacs in the install sentinel."
   (when (string-prefix-p "finished" event)
 	(if (not (zerop (process-exit-status process)))
 		(message "dsh bridge: plugin install failed; see the *dsh-bridge-install* buffer")
-	  (dsh-bridge--plugin-state-invalidate)
+	  (setq dsh-bridge--plugin-state nil)
 	  (dsh-bridge--plugin-diagnosed-reset)
 	  (dsh-bridge--validate-plugin-install-async))))
 
@@ -762,7 +758,7 @@ exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
 								(list "plugin" "--profile" dsh-bridge-profile
 									  "remove" "dsh-emacs-bridge"))))
 		  (progn
-			(dsh-bridge--plugin-state-invalidate)
+			(setq dsh-bridge--plugin-state nil)
 			(dsh-bridge--plugin-diagnosed-reset)
 			(message "Removed dsh-emacs-bridge from the `%s' profile; restart \"dsh %s\" to unload it"
 					 dsh-bridge-profile dsh-bridge-profile))
