@@ -1418,7 +1418,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
                (lambda (&rest _)
                  (dsh-bridge-test--mock-response 200 "{\"token\":\"abc\"}"))))
       (should (eq (dsh-bridge--plugin-state-probe) 'running))
-      (should (eq dsh-bridge--plugin-state 'running)))))
+      (should (eq dsh-bridge--plugin-state nil)))))
 
 (ert-deftest dsh-bridge-plugin-state-html-body ()
   "A 200 with an HTML body (a catch-all SPA fallback) is not the plugin."
@@ -1452,22 +1452,28 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
       (should (eq (dsh-bridge--plugin-state-probe) 'unreachable)))))
 
 (ert-deftest dsh-bridge-plugin-state-cached ()
-  "The probe result is cached per session."
-  (let ((dsh-bridge--plugin-state nil) (calls 0))
+  "`dsh-bridge--ensure-plugin' caches the probe result per session."
+  (let ((dsh-bridge--plugin-state nil) (calls 0)
+        (dsh-bridge--plugin-version-checked t)
+        (dsh-bridge--plugin-diagnosed nil))
     (cl-letf (((symbol-function 'url-retrieve-synchronously)
                (lambda (&rest _)
                  (setq calls (1+ calls))
                  (dsh-bridge-test--mock-response 200 "{\"token\":\"abc\"}"))))
-      (dsh-bridge--plugin-state-probe)
-      (dsh-bridge--plugin-state-probe)
-      (should (= calls 1)))
+      (dsh-bridge--ensure-plugin)
+      (dsh-bridge--ensure-plugin)
+      (should (= calls 1))
+      (should (eq dsh-bridge--plugin-state 'running)))
     (dsh-bridge--note-request-failure)
     (cl-letf (((symbol-function 'url-retrieve-synchronously)
                (lambda (&rest _)
                  (setq calls (1+ calls))
                  (dsh-bridge-test--mock-response 200 "{\"token\":\"abc\"}"))))
-      (dsh-bridge--plugin-state-probe)
-      (should (= calls 2)))))
+      (dsh-bridge--ensure-plugin)
+      (should (= calls 2))
+      (should (eq dsh-bridge--plugin-state 'running)))
+    ;; Do not leak the cached state into later tests.
+    (setq dsh-bridge--plugin-state nil)))
 
 (ert-deftest dsh-bridge-note-request-failure ()
   "A 404 drops the cache only when it contradicts the cached state."
@@ -1553,7 +1559,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
 
 (ert-deftest dsh-bridge-ensure-plugin-running-noop ()
   "A running plugin needs no diagnosis, only the version check."
-  (let ((dsh-bridge--plugin-diagnosed nil) (msg nil) (checked nil))
+  (let ((dsh-bridge--plugin-state nil) (dsh-bridge--plugin-diagnosed nil) (msg nil) (checked nil))
     (cl-letf (((symbol-function 'dsh-bridge--plugin-state-probe)
                (lambda () 'running))
               ((symbol-function 'dsh-bridge--maybe-check-plugin-version)
@@ -1567,7 +1573,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
 
 (ert-deftest dsh-bridge-ensure-plugin-offers-when-missing ()
   "Not-running + not installed + `ask' offers; declining latches."
-  (let ((dsh-bridge--plugin-diagnosed nil) (offered nil) (msg nil)
+  (let ((dsh-bridge--plugin-state nil) (dsh-bridge--plugin-diagnosed nil) (offered nil) (msg nil)
         (dsh-bridge-dsh-command '("dsh")))
     (cl-letf (((symbol-function 'dsh-bridge--plugin-state-probe)
                (lambda () 'not-running))
@@ -1595,7 +1601,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
 
 (ert-deftest dsh-bridge-ensure-plugin-installs-on-yes ()
   "Accepting the offer starts the asynchronous install."
-  (let ((dsh-bridge--plugin-diagnosed nil) (installed nil)
+  (let ((dsh-bridge--plugin-state nil) (dsh-bridge--plugin-diagnosed nil) (installed nil)
         (dsh-bridge-dsh-command '("dsh")))
     (cl-letf (((symbol-function 'dsh-bridge--plugin-state-probe)
                (lambda () 'not-running))
@@ -1612,7 +1618,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
 
 (ert-deftest dsh-bridge-ensure-plugin-installed-not-loaded ()
   "Not-running + installed says to restart, with no offer."
-  (let ((dsh-bridge--plugin-diagnosed nil) (msg nil))
+  (let ((dsh-bridge--plugin-state nil) (dsh-bridge--plugin-diagnosed nil) (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--plugin-state-probe)
                (lambda () 'not-running))
               ((symbol-function 'dsh-bridge--plugin-installed-p) (lambda () t))
@@ -1623,7 +1629,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
 
 (ert-deftest dsh-bridge-ensure-plugin-unreachable ()
   "Unreachable + installed reports the server is down, no offer."
-  (let ((dsh-bridge--plugin-diagnosed nil) (msg nil))
+  (let ((dsh-bridge--plugin-state nil) (dsh-bridge--plugin-diagnosed nil) (msg nil))
     (cl-letf (((symbol-function 'dsh-bridge--plugin-state-probe)
                (lambda () 'unreachable))
               ((symbol-function 'dsh-bridge--plugin-installed-p) (lambda () t))
@@ -1634,7 +1640,7 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
 
 (ert-deftest dsh-bridge-ensure-plugin-unreachable-not-installed ()
   "Unreachable + not installed still offers (installing needs no server)."
-  (let ((dsh-bridge--plugin-diagnosed nil) (offered nil)
+  (let ((dsh-bridge--plugin-state nil) (dsh-bridge--plugin-diagnosed nil) (offered nil)
         (dsh-bridge-dsh-command '("dsh")))
     (cl-letf (((symbol-function 'dsh-bridge--plugin-state-probe)
                (lambda () 'unreachable))

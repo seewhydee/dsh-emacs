@@ -409,39 +409,32 @@ and `forbidden'.  The cache is set per-session, and is reset if a real
 request contradicts it or an install/uninstall runs.")
 
 (defun dsh-bridge--plugin-state-probe ()
-  "Probe the status of the DSH bridge plugin, caching the result.
-Possible return values are `running', `not-running', `unreachable', or
-`forbidden'.
+  "Probe the status of the DSH bridge plugin.
+Possible values: `running', `not-running', `unreachable', `forbidden'.
 
-This is a helper function for `dsh-bridge--ensure-plugin', and works by
-requesting \"GET /dsh-bridge/token\" directly (the route is auth-free
-and loopback-fenced).  The results are determined by the response
-body (JSON with a non-empty `token' string), not the HTTP status alone."
-  (or dsh-bridge--plugin-state
-	  (setq dsh-bridge--plugin-state
-			(let ((url-request-method "GET")
-				  (url-request-data nil)
-				  (url-request-extra-headers nil)
-				  (buf (condition-case nil
-						   (url-retrieve-synchronously
-							(concat dsh-bridge-url "/token")
-							t nil dsh-bridge-timeout)
-						 (error nil))))
-			  (if (null buf)
-				  'unreachable
-				(let* ((status (with-current-buffer buf
-								 (and (boundp 'url-http-response-status)
-									  url-http-response-status)))
-					   (body (dsh-bridge--response-body buf))
-					   (alist (condition-case nil
-								  (json-parse-string body :object-type 'alist)
-								(error nil)))
-					   (token (and alist (alist-get 'token alist))))
-				  (kill-buffer buf)
-				  (cond
-				   ((eq status 403) 'forbidden)
-				   ((and (stringp token) (not (string-empty-p token))) 'running)
-				   (t 'not-running))))))))
+This helper function for `dsh-bridge--ensure-plugin' works by requesting
+\"GET /dsh-bridge/token\" (which is auth-free and loopback-fenced).  The
+results are determined by the response body, not the HTTP status alone."
+  (let* ((url-request-method "GET")
+		 (url-request-data nil)
+		 (url-request-extra-headers nil)
+		 (buf (ignore-errors
+				(url-retrieve-synchronously (concat dsh-bridge-url "/token")
+											t nil dsh-bridge-timeout))))
+	(if (null buf)
+		'unreachable
+	  (let* ((status (with-current-buffer buf
+					   (and (boundp 'url-http-response-status)
+							url-http-response-status)))
+			 (body (dsh-bridge--response-body buf))
+			 (alist (ignore-errors
+					  (json-parse-string body :object-type 'alist)))
+			 (token (and alist (alist-get 'token alist))))
+		(kill-buffer buf)
+		(cond
+		 ((eq status 403) 'forbidden)
+		 ((and (stringp token) (not (string-empty-p token))) 'running)
+		 (t 'not-running))))))
 
 (defun dsh-bridge--note-request-failure ()
   "Drop the probe cache when a real request contradicts it.
@@ -515,7 +508,9 @@ anyway, so nil skips the check."
   "The running plugin's version per GET /dsh-bridge/status, or nil when unknown.
 A non-200 (e.g. 404 from a copy that predates the route) yields nil, which
 the caller reads as staleness evidence, not as silence."
-  (let ((url-request-method "GET")
+  ;; `let*' so the request settings are in scope when `buf' is computed (see
+  ;; `dsh-bridge--plugin-state-probe').
+  (let* ((url-request-method "GET")
 		(url-request-data nil)
 		(url-request-extra-headers nil)
 		(buf (condition-case nil
@@ -561,7 +556,9 @@ request error.	When the plugin is missing, offer to install it
 asynchronously, with a `--dump-config' validation before suggesting a
 restart.  When the plugin is running, its version is compared against the
 bundled payload once per session."
-  (let ((state (dsh-bridge--plugin-state-probe)))
+  (let ((state (or dsh-bridge--plugin-state ; use cache, or probe explicitly
+				   (setq dsh-bridge--plugin-state
+						 (dsh-bridge--plugin-state-probe)))))
 	(cond
 	 ((eq state 'running)
 	  (dsh-bridge--maybe-check-plugin-version))
