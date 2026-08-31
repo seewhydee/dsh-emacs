@@ -2222,5 +2222,23 @@ when the caches are empty."
      '(((kind . "context") (sessionId . "s1") (usedTokens . 45) (contextWindow . 100000))))
     (should (equal (assoc "s1" dsh-bridge--session-context) '("s1" 45 . 100000)))))
 
+(ert-deftest dsh-bridge-notification-turn-frames-refresh-models ()
+  "Turn frames force-refresh a cached session's model entry, and leave
+uncached sessions alone.  `run-at-time' is stubbed to run immediately."
+  (let ((dsh-bridge--session-models '(("s1" . ((current . ((provider . "p") (model . "m")))))))
+        (dsh-bridge--session-status nil)
+        (refetched nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest args) (apply fn args)))
+              ((symbol-function 'dsh-bridge--fetch-models)
+               (lambda (id force) (push (cons id force) refetched)))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--turn-complete-act) #'ignore))
+      (dsh-bridge--notification-handle-events
+       '(((kind . "turn-start") (sessionId . "s1"))
+         ((kind . "turn-complete") (sessionId . "s1"))
+         ((kind . "turn-complete") (sessionId . "s2"))))
+      (should (equal refetched '(("s1" . t) ("s1" . t)))))))
+
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

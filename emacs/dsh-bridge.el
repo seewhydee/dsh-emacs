@@ -791,11 +791,13 @@ text with no complete event terminator."
 
 (defun dsh-bridge--notification-handle-events (events)
   "Dispatch decoded SSE EVENTS for the bridge's own concerns.
-`turn-start`/`turn-complete` update the status tracker and re-render the
-affected surfaces; `sessions-changed` debounces a sessions-list refetch; outbox
-notices are handled by the caller (`receive').	The view/prompt render helpers
-are defined later in this file (resolved at runtime; the package is not
-byte-compiled, so forward refs are harmless here)."
+`turn-start`/`turn-complete` update the status tracker, re-render the
+affected surfaces, and refresh the model cache (a turn boundary is when a
+web-UI model change takes effect); `sessions-changed` debounces a
+sessions-list refetch; outbox notices are handled by the caller
+(`receive').	The view/prompt render helpers are defined later in this file
+(resolved at runtime; the package is not byte-compiled, so forward refs are
+harmless here)."
   (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed")) events)
 	(dsh-bridge--notification-sessions-changed))
   (dolist (event events)
@@ -805,13 +807,15 @@ byte-compiled, so forward refs are harmless here)."
 		(let ((id (alist-get 'sessionId event)))
 		  (when id
 			(dsh-bridge--status-set id 'running)
-			(dsh-bridge--status-event-render id))))
+			(dsh-bridge--status-event-render id)
+			(dsh-bridge--models-event-refresh id))))
 	   ((equal kind "turn-complete")
 		(let ((id (alist-get 'sessionId event))
 			  (reason (alist-get 'reason event)))
 		  (when id
 			(dsh-bridge--status-set id 'idle)
 			(dsh-bridge--status-event-render id)
+			(dsh-bridge--models-event-refresh id)
 			(dsh-bridge--turn-complete-act id reason))))
 	   ((equal kind "context")
 		(let ((id (alist-get 'sessionId event))
@@ -2025,6 +2029,15 @@ request (the read-through display cache).  Returns nil on failure."
           (push (cons session-id alist) dsh-bridge--session-models))))
     (cdr (assoc session-id dsh-bridge--session-models))))
 
+(defun dsh-bridge--models-event-refresh (session-id)
+  "Force-refresh SESSION-ID's model cache after a turn SSE frame, when cached.
+A web-UI model change takes effect at the session's next turn, so the turn
+frames are the refresh trigger that keeps the header from going stale.
+Sessions with no cache entry (nothing is displaying them) are left alone.
+Deferred with `run-at-time' to keep the SSE process filter non-blocking."
+  (when (assoc session-id dsh-bridge--session-models)
+    (run-at-time 0 nil #'dsh-bridge--fetch-models session-id t)))
+
 (defun dsh-bridge--fetch-context (session-id)
   "Seed the context cache for SESSION-ID from GET /context, when uncached.
 Returns the (USED-TOKENS . CONTEXT-WINDOW) entry, or nil when unknown."
@@ -2144,7 +2157,7 @@ session and persists as the default, exactly as the web UI does."
                            (if (eq action 'metadata)
                                `(metadata (annotation-function . ,annotation))
                              (complete-with-action action (mapcar #'car catalog) string pred)))
-                         nil t current-key)))
+                         nil t nil nil current-key)))
             (when (and chosen (not (string-empty-p chosen)))
               (let* ((entry (assoc chosen catalog))
                      (provider (cadr entry))
@@ -2163,7 +2176,7 @@ session and persists as the default, exactly as the web UI does."
                     (setq effort
                           (cdr (assoc (completing-read "Reasoning effort: "
                                                        (mapcar #'car by-name)
-                                                       nil t default-name)
+                                                       nil t nil nil default-name)
                                       by-name)))))
                 (dsh-bridge--select-model-apply
                  session-id provider (alist-get 'id model-entry) effort)))))))))
