@@ -466,10 +466,9 @@ response means the route (and hence the plugin) is absent."
 											t nil dsh-bridge-timeout))))
 	(if (null buf)
 		'unreachable
-	  (let* ((status (with-current-buffer buf
-					   (and (boundp 'url-http-response-status)
-							url-http-response-status)))
-			 (body (dsh-bridge--response-body buf))
+	  (let* ((response (dsh-bridge--response buf))
+			 (status (car response))
+			 (body (cdr response))
 			 (alist (ignore-errors
 					  (json-parse-string body :object-type 'alist))))
 		(kill-buffer buf)
@@ -703,14 +702,20 @@ restart \"dsh %s\" to complete unload"
 
 ;;; Low-level HTTP plumbing
 
-(defun dsh-bridge--response-body (buffer)
-  "Return the HTTP response body of BUFFER."
+(defun dsh-bridge--response (buffer)
+  "Return (STATUS . BODY) for BUFFER.
+STATUS is the HTTP response status code (`url-http-response-status', or nil
+when the buffer carries none); BODY is the UTF-8 text after the response
+headers (\"\" when no header terminator is present)."
   (with-current-buffer buffer
-	(goto-char (point-min))
-	(if (re-search-forward "\r?\n\r?\n" nil t)
-		(decode-coding-string
-		 (buffer-substring-no-properties (point) (point-max)) 'utf-8)
-	  "")))
+	(let ((status (and (boundp 'url-http-response-status)
+					   url-http-response-status)))
+	  (goto-char (point-min))
+	  (cons status
+			(if (re-search-forward "\r?\n\r?\n" nil t)
+				(decode-coding-string
+				 (buffer-substring-no-properties (point) (point-max)) 'utf-8)
+			  "")))))
 
 (defun dsh-bridge--token ()
   "Return the bridge bearer token as a unibyte string, or nil if none."
@@ -977,11 +982,11 @@ The listener stays off until `dsh-bridge-notifications-start' is called."
 ;;; Bridge requests
 
 (defun dsh-bridge--extra-headers (payload)
-  "Return the HTTP header alist for a request with PAYLOAD (nil for no body).
-Always includes the bearer Authorization header when a token is known."
+  "Return HTTP header alist for request with PAYLOAD (nil for no body).
+Include the Authorization header if a bearer token is known."
   (let ((token (dsh-bridge--token)))
 	(append (and payload '(("Content-Type" . "application/json")))
-			(and token (list (cons "Authorization" (concat "Bearer " token)))))))
+			(and token `(("Authorization" . ,(concat "Bearer " token)))))))
 
 (defun dsh-bridge--path (path session-id)
   "Return PATH with an optional ?sessionId= query parameter."
@@ -990,9 +995,9 @@ Always includes the bearer Authorization header when a token is known."
 	path))
 
 (defun dsh-bridge--error-message (status http-status alist)
-  "Return a user-facing error message for a failed request, or nil on success.
-STATUS is the url-retrieve status plist, HTTP-STATUS the HTTP status code (or
-nil), and ALIST the decoded JSON body (or nil)."
+  "Return an error message for a failed request, or nil on success.
+STATUS is the url-retrieve status plist, HTTP-STATUS is the HTTP status
+code or nil, and ALIST is the decoded JSON body or nil."
   (let ((transport-error (plist-get status :error)))
 	(cond
 	 (transport-error (format "request failed: %s" transport-error))
@@ -1003,7 +1008,7 @@ nil), and ALIST the decoded JSON body (or nil)."
 	 (t nil))))
 
 (defun dsh-bridge--call (method path payload callback)
-  "Perform METHOD request to PATH under `dsh-bridge-url'.
+  "Perform METHOD request to PATH on the DeepSeek Harness bridge.
 PAYLOAD is an alist encoded as JSON (for POST) or nil (for GET).
 CALLBACK is invoked with (status body-string HTTP-STATUS), where STATUS is nil
 on a completed request (whatever the HTTP status) or an `:error' plist on a
@@ -1011,9 +1016,9 @@ transport failure/timeout.	Uses `url-retrieve-synchronously': a request here
 is a short loopback round-trip, and the async `url-retrieve' path reports
 process-sentinel failures (such as the bug#23750 \"Multibyte text in HTTP
 request\" error) only via `message', which made them hard to diagnose."
-  ;; Start the notification listener before the plugin check: `--ensure-plugin'
-  ;; can (in a source checkout) diagnose or error, and the status tracker must
-  ;; hear `turn-start'/'turn-complete' regardless of that outcome.
+  ;; Start the notification listener before the plugin check:
+  ;; `dsh-bridge--ensure-plugin' can diagnose or error, and the status
+  ;; tracker must hear `turn-start'/'turn-complete' regardless.
   (dsh-bridge-notifications-start t)
   (dsh-bridge--ensure-plugin)
   (let ((url-request-method method)
@@ -1032,10 +1037,9 @@ request\" error) only via `message', which made them hard to diagnose."
 	   ((null buf) (dsh-bridge--note-request-failure)
 		(funcall callback '(:error "request timed out") nil nil))
 	   (t
-		(let ((http-status (with-current-buffer buf
-							 (and (boundp 'url-http-response-status)
-								  url-http-response-status)))
-			  (body (dsh-bridge--response-body buf)))
+		(let* ((response (dsh-bridge--response buf))
+			   (http-status (car response))
+			   (body (cdr response)))
 		  (kill-buffer buf)
 		  (when (memq http-status '(401 404))
 			(dsh-bridge--note-request-failure))
@@ -1057,20 +1061,19 @@ when the body is not a JSON object."
 										   t nil dsh-bridge-timeout)))
 	  (if (null buf)
 		  (progn (dsh-bridge--note-request-failure) (cons nil nil))
-		(with-current-buffer buf
-		  (let* ((status (and (boundp 'url-http-response-status)
-							  url-http-response-status))
-				 (body (dsh-bridge--response-body buf))
-				 (alist (condition-case nil
-							(json-parse-string body :object-type 'alist
-											   :array-type 'list
-											   :null-object nil
-											   :false-object nil)
-						  (error nil))))
-			(kill-buffer buf)
-			(when (memq status '(401 404))
-			  (dsh-bridge--note-request-failure))
-			(cons status alist)))))))
+		(let* ((response (dsh-bridge--response buf))
+			   (status (car response))
+			   (body (cdr response))
+			   (alist (condition-case nil
+						  (json-parse-string body :object-type 'alist
+											 :array-type 'list
+											 :null-object nil
+											 :false-object nil)
+						(error nil))))
+		  (kill-buffer buf)
+		  (when (memq status '(401 404))
+			(dsh-bridge--note-request-failure))
+		  (cons status alist))))))
 
 (defun dsh-bridge--fetch-sessions ()
   "Return a list of DSH session data, or nil on error.
