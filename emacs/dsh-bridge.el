@@ -69,6 +69,8 @@
 (require 'json)
 (require 'transient)
 
+;;; Customize options
+
 (defgroup dsh-bridge nil
   "Connect Emacs to a DeepSeek Harness session."
   :group 'tools)
@@ -191,6 +193,29 @@ This option does not affect \\`C-c C-d' (`dsh-bridge-draft')."
   :type 'boolean
   :group 'dsh-bridge)
 
+(defcustom dsh-bridge-dsh-command nil
+  "How the `dsh' process is invoked.
+This variable is used only when installing (or uninstalling) the DSH
+plugin.  Its value can be one of the following:
+
+- nil (the default) does auto-detection.  The first available of these
+  is used: `dsh' on PATH, the npm global bin directory, or
+  `npx --yes @deepseek-ai/dsh'.
+
+- A single shell-style command, which is first processed with
+  `split-string-and-unquote' (which handles quotes and backslashes, but
+  does NOT expand ~).  Example: \"pnpm -C /path/to/deepseek-harness dsh\"
+
+- A list of strings: a command, followed by arguments, all handled
+  verbatim."
+  :type '(choice (const :tag "Auto-detect" nil)
+				 (string :tag "Command line (split shell-style)")
+				 (repeat :tag "Argv list (verbatim)" string))
+  :group 'dsh-bridge)
+
+
+;;; Session tracking
+
 (defvar dsh-bridge-default-session nil
   "The DSH bridge's default target session ID, if any.
 Set with `dsh-bridge-set-default-target', or \\`t' in the DSH-Sessions
@@ -213,8 +238,7 @@ LABEL is the corresponding display label, taken from the response's
 `title' when present and from `dsh-bridge--label-for-id' otherwise.
 Its value may be nil if the request is still incomplete.")
 
-;; Forward declaration; real definition in view-buffer section below.
-(defvar dsh-bridge--view-content-session)
+(defvar dsh-bridge--view-content-session) ; forward declaration
 
 (defvar dsh-bridge--sessions-cache nil
   "Cache of DeepSeek Harness session data.
@@ -233,8 +257,6 @@ session.  The row alist has the following keys:
   "Whether `*dsh-bridge-sessions*' shows archived sessions.
 Initialized from `dsh-bridge-sessions-show-archived' when the buffer is
 created and toggled by `v'.")
-
-;;; Session status tracking
 
 (defvar dsh-bridge--session-status nil
   "Alist of (SESSION-ID . running|idle) live session status, or nil.
@@ -306,26 +328,6 @@ The choice of string contents is based on `dsh-bridge--status-state'."
 ;; function `dsh-bridge--ensure-plugin', which is called on common
 ;; entry-points and detects the presence or absence of DSH and/or the
 ;; necessary DSH plugin, including offering to install the plugin.
-
-(defcustom dsh-bridge-dsh-command nil
-  "How the `dsh' process is invoked.
-This variable is used only when installing (or uninstalling) the DSH
-plugin.  Its value can be one of the following:
-
-- nil (the default) does auto-detection.  The first available of these
-  is used: `dsh' on PATH, the npm global bin directory, or
-  `npx --yes @deepseek-ai/dsh'.
-
-- A single shell-style command, which is first processed with
-  `split-string-and-unquote' (which handles quotes and backslashes, but
-  does NOT expand ~).  Example: \"pnpm -C /path/to/deepseek-harness dsh\"
-
-- A list of strings: a command, followed by arguments, all handled
-  verbatim."
-  :type '(choice (const :tag "Auto-detect" nil)
-				 (string :tag "Command line (split shell-style)")
-				 (repeat :tag "Argv list (verbatim)" string))
-  :group 'dsh-bridge)
 
 (defun dsh-bridge--detect-npm-launcher ()
   "Helper function to auto-detect an npm command for launching DSH."
@@ -400,24 +402,21 @@ tree one (a `dsh-plugin' directory next to the `emacs/' directory)."
 				(list (expand-file-name "dsh-plugin" here)
 					  (expand-file-name "../dsh-plugin" here))))))
 
-;; The probe: is the plugin loaded?
-
 (defvar dsh-bridge--plugin-state nil
-  "Cached bridge-plugin probe result, or nil when not yet probed.
-One of `running', `not-running', `unreachable', or `forbidden'.	 The cache
-is per-session — plugin presence can only change across a `dsh web' restart
-— and is dropped when a real request contradicts it or when an install or
-uninstall runs.")
+  "Cached DSH bridge plugin state, or nil if not yet probed.
+The possible non-nil values are `running', `not-running', `unreachable',
+and `forbidden'.  The cache is set per-session, and is reset if a real
+request contradicts it or an install/uninstall runs.")
 
 (defun dsh-bridge--plugin-state-probe ()
-  "Probe whether the bridge plugin is loaded, caching the result.
-Requests `GET /dsh-bridge/token' directly — not through
-`dsh-bridge--request'/`--call' — so the probe neither recurses into
-`dsh-bridge--ensure-plugin' nor starts the notification listener.  The
-route is auth-free (loopback-fenced).  The discriminator is the response
-*body* — JSON with a non-empty `token' string — never the HTTP status
-alone, so a future catch-all SPA fallback or a 405 cannot be misread.
-Returns `running', `not-running', `unreachable', or `forbidden'."
+  "Probe the status of the DSH bridge plugin, caching the result.
+Possible return values are `running', `not-running', `unreachable', or
+`forbidden'.
+
+This is a helper function for `dsh-bridge--ensure-plugin', and works by
+requesting \"GET /dsh-bridge/token\" directly (the route is auth-free
+and loopback-fenced).  The results are determined by the response
+body (JSON with a non-empty `token' string), not the HTTP status alone."
   (or dsh-bridge--plugin-state
 	  (setq dsh-bridge--plugin-state
 			(let ((url-request-method "GET")
