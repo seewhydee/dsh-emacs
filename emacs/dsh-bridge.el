@@ -26,9 +26,8 @@
 ;; session, moving text from Emacs to DSH and back over loopback HTTP.
 ;; This lets you compose prompts and read DSH's replies within Emacs.
 
-;; This Emacs package is bundled with a plugin for DSH, which should
-;; be installed with \\`M-x dsh-bridge-install-plugin', before using
-;; any of the other commands.
+;; It is bundled with a plugin for DSH, which should be installed with
+;; \\`M-x dsh-bridge-install-plugin' before using the other commands.
 
 ;; BASIC USAGE:
 ;;
@@ -36,7 +35,7 @@
 ;;
 ;; `dsh-bridge'					  - transient dispatcher
 ;; `dsh-bridge-list-sessions'	  - browse DSH sessions
-;; (consider giving one of both of the above a global keybinding)
+;; Consider giving one of both of these a global keybinding.
 ;;
 ;; \\`M-x dsh-bridge' opens a transient menu that prompts for the next
 ;; command, with the top line showing the session your next command
@@ -676,32 +675,10 @@ exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
 		(display-buffer buffer)
 		(user-error "dsh plugin remove failed; see the *dsh-bridge-install* buffer")))))
 
-;; First-load notice.
-
-(defvar dsh-bridge--first-load-notice-done nil
-  "Non-nil once the first-load install pointer has been shown.")
-
-(defun dsh-bridge--maybe-first-load-notice ()
-  "Echo a one-time pointer to `dsh-bridge-install-plugin' on load.
-Runs when this file is loaded: if the profile manifest lacks the plugin and
-there is evidence DSH exists — a profile directory, or a real CLI (the npx
-fallback does not count; it means only that npm is installed) — a single
-message points at the install command.  The profile check (cheap) runs
-before the CLI detection (which can spawn npm), so an installed plugin
-costs no subprocess at load."
-  (when (and (not dsh-bridge--first-load-notice-done)
-			 (let ((state (dsh-bridge--plugin-install-state)))
-			   (and (not (eq state 'installed))
-					(or (eq state 'not-installed)
-						(dsh-bridge--dsh-installed-p)))))
-	(setq dsh-bridge--first-load-notice-done t)
-	(message "dsh bridge: the bridge plugin is not installed in the `%s' profile — run `M-x dsh-bridge-install-plugin' to install it"
-			 dsh-bridge-profile)))
-
 ;;; Low-level HTTP plumbing
 
 (defun dsh-bridge--response-body (buffer)
-  "Return the HTTP response body (text after the headers) of BUFFER.
+  "Return the HTTP response body of BUFFER.
 The url-http response buffer is unibyte, so decode the body as UTF-8."
   (with-current-buffer buffer
 	(goto-char (point-min))
@@ -711,19 +688,14 @@ The url-http response buffer is unibyte, so decode the body as UTF-8."
 	  "")))
 
 (defun dsh-bridge--token ()
-  "Return the bridge bearer token as a unibyte string, or nil if none.
-
-`insert-file-contents' yields a multibyte string, and a multibyte (even
-pure-ASCII) Authorization header value poisons url-http's request
-concatenation: when the request body then contains non-ASCII bytes, the
-request string becomes multibyte and url-http errors with \"Multibyte
-text in HTTP request\" (bug#23750) in the process sentinel — surfacing
-only as a request timeout.	The token is hex, so coercing to unibyte is
-lossless."
+  "Return the bridge bearer token as a unibyte string, or nil if none."
   (let ((token (and (file-readable-p dsh-bridge-token-file)
 					(with-temp-buffer
 					  (insert-file-contents dsh-bridge-token-file)
 					  (string-trim (buffer-string))))))
+	;; `insert-file-contents' yields a multibyte string, which is not
+	;; accepted by `url-http'.  Multibyteness can even be induced by
+	;; the authorization header, so watch out.
 	(and token (string-to-unibyte token))))
 
 ;;; Push notifications (loopback SSE listener: status, sessions-changed, Send-to-Emacs)
@@ -2877,10 +2849,6 @@ effective session, `f' fetches the latest reply, `t' sets the default target,
   "DSH Bridge menu, installed under Tools.")
 
 (easy-menu-add-item nil '("Tools") dsh-bridge-menu)
-
-;; A one-time pointer to the install command when the plugin is missing
-;; (see `dsh-bridge--maybe-first-load-notice').
-(dsh-bridge--maybe-first-load-notice)
 
 (provide 'dsh-bridge)
 
