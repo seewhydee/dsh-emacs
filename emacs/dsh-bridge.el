@@ -936,24 +936,29 @@ burst of frames (e.g., a rename) into one refresh."
 	 (format "GET %s?token=%s HTTP/1.1\r\nHost: %s:%d\r\nAccept: text/event-stream\r\n\r\n"
 			 (url-filename parsed) (url-hexify-string token) host port))))
 
-(defun dsh-bridge-notifications-start ()
-  "Connect the DSH bridge notification listener.
-This function is idempotent.  It clears the pause latch, so the listener
-works until `dsh-bridge-notifications-stop' is called again."
+(defun dsh-bridge-notifications-start (&optional conditional)
+  "Enable the DSH bridge notification listener (idempotent).
+If called non-interactively with CONDITIONAL non-nil, do nothing if
+`dsh-bridge--notifications-paused' or `dsh-bridge--notifications-enabled'
+is non-nil."
   (interactive)
-  (setq dsh-bridge--notifications-paused nil)
-  (setq dsh-bridge--notifications-enabled t)
-  (when (timerp dsh-bridge--notifications-timer)
-	(cancel-timer dsh-bridge--notifications-timer)
-	(setq dsh-bridge--notifications-timer nil))
-  (unless (and dsh-bridge--notifications-process
-			   (process-live-p dsh-bridge--notifications-process))
-	(let ((token (dsh-bridge--token)))
-	  (if (null token)
-		  (dsh-bridge--notifications-retry)
-		(condition-case nil
-			(dsh-bridge--notifications-connect token)
-		  (error (dsh-bridge--notifications-retry)))))))
+  (when (or (null conditional)
+			(and (not dsh-bridge--notifications-paused)
+				 (not dsh-bridge--notifications-enabled)))
+	(setq dsh-bridge--notifications-paused nil)
+	(setq dsh-bridge--notifications-enabled t)
+
+	(when (timerp dsh-bridge--notifications-timer)
+	  (cancel-timer dsh-bridge--notifications-timer)
+	  (setq dsh-bridge--notifications-timer nil))
+	(unless (and dsh-bridge--notifications-process
+				 (process-live-p dsh-bridge--notifications-process))
+	  (let ((token (dsh-bridge--token)))
+		(if (null token)
+			(dsh-bridge--notifications-retry)
+		  (condition-case nil
+			  (dsh-bridge--notifications-connect token)
+			(error (dsh-bridge--notifications-retry))))))))
 
 (defun dsh-bridge-notifications-stop ()
   "Pause the DSH bridge notification listener.
@@ -968,15 +973,6 @@ The listener stays off until `dsh-bridge-notifications-start' is called."
 			 (process-live-p dsh-bridge--notifications-process))
 	(delete-process dsh-bridge--notifications-process))
   (setq dsh-bridge--notifications-process nil))
-
-(defun dsh-bridge--ensure-notifications ()
-  "Start the notification listener on first bridge use, unless paused.
-The bridge always subscribes to its event stream (status tracking, sessions-list
-auto-refresh, and the \"Send to Emacs\" push all ride it); only an explicit
-`dsh-bridge-notifications-stop' pauses it for the session."
-  (when (and (not dsh-bridge--notifications-paused)
-			 (not dsh-bridge--notifications-enabled))
-	(dsh-bridge-notifications-start)))
 
 ;;; Bridge requests
 
@@ -1018,7 +1014,7 @@ request\" error) only via `message', which made them hard to diagnose."
   ;; Start the notification listener before the plugin check: `--ensure-plugin'
   ;; can (in a source checkout) diagnose or error, and the status tracker must
   ;; hear `turn-start'/'turn-complete' regardless of that outcome.
-  (dsh-bridge--ensure-notifications)
+  (dsh-bridge-notifications-start t)
   (dsh-bridge--ensure-plugin)
   (let ((url-request-method method)
 		(url-request-data
@@ -1051,7 +1047,7 @@ STATUS is the HTTP status code, or nil on transport failure.  ALIST is the
 decoded JSON object (JSON null/false become nil, arrays become lists), or nil
 when the body is not a JSON object."
   ;; Start the listener before the plugin check (see `dsh-bridge--call').
-  (dsh-bridge--ensure-notifications)
+  (dsh-bridge-notifications-start t)
   (dsh-bridge--ensure-plugin)
   (let ((url-request-method method)
 		(url-request-data
