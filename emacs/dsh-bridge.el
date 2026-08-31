@@ -359,27 +359,26 @@ directory, and (iii) `npx --yes @deepseek-ai/dsh'."
 
 (defun dsh-bridge--plugin-installed-p ()
   "Whether the bridge plugin is installed in the DSH profile.
-Reads the profile manifest (`$DSH_HOME/profiles/<profile>/package.json'):
-the plugin counts as installed when it appears in `dependencies' or in
-`dsh.profile.bundles'.	Returns nil when the manifest is missing or
-unreadable (also the \"profile never initialized\" case)."
+This works by reading the package.json manifest in DSH's profile
+directory; the plugin counts as installed if it appears in
+`dependencies' or in `dsh.profile.bundles'."
   (let ((manifest (expand-file-name ; get profile's package.json manifest
 				   (format "profiles/%s/package.json" dsh-bridge-profile)
-				   (dsh-bridge--dsh-home))))
+				   (dsh-bridge--dsh-home)))
+		data)
 	(when (file-readable-p manifest)
-	  (let ((data (with-temp-buffer
-					(insert-file-contents manifest)
-					(condition-case nil
-						(json-parse-string (buffer-string) :object-type 'alist
-										   :array-type 'list)
-					  (error nil)))))
-		(and data
-			 (or (assoc 'dsh-emacs-bridge
-						(alist-get 'dependencies data))
-				 (member "dsh-emacs-bridge"
-						 (alist-get 'bundles
-									(alist-get 'profile
-											   (alist-get 'dsh data))))))))))
+	  (setq data (with-temp-buffer
+				   (insert-file-contents manifest)
+				   (ignore-errors
+					 (json-parse-string (buffer-string)
+										:object-type 'alist
+										:array-type 'list))))
+	  (when data
+		(or (assoc 'dsh-emacs-bridge (alist-get 'dependencies data))
+			(member "dsh-emacs-bridge"
+					(alist-get 'bundles
+							   (alist-get 'profile
+										  (alist-get 'dsh data)))))))))
 
 (defun dsh-bridge--plugin-directory ()
   "Return the directory holding the bundled `dsh-emacs-bridge' plugin, or nil.
