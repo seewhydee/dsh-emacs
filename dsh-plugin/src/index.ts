@@ -54,6 +54,8 @@ import { Outbox } from './outbox.ts'
 import {
   assistantReplies,
   classifySessionId,
+  contextMessage,
+  contextUsedTokens,
   draftMessage,
   isLoopbackAddress,
   isSubagentChild,
@@ -64,6 +66,8 @@ import {
   outboxSessionId,
   parseBearerAuthorization,
   resolveTargetId,
+  rpcRequestFrame,
+  rpcUnwrapResponse,
   sessionTitle,
   sessionsChangedMessage,
   tokenRequestsSameOrigin,
@@ -92,6 +96,8 @@ interface WebServerService {
     path: string
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
   }): () => void
+  /** The listening port (the OS-assigned value when config.port is 0). */
+  port: number
 }
 
 /** Minimal face of the `sessions` service: enumerate live sessions. */
@@ -118,6 +124,16 @@ interface ProjectionSnapshotLike {
  */
 interface ProjectionCacheService {
   cachedSnapshot(meta: SessionHeader): ProjectionSnapshotLike | undefined
+}
+
+/**
+ * Minimal face of the optional `sessionProjections` registry (the live change
+ * feed + snapshot read). Read via `ctx.get`; a profile without the registry
+ * simply yields undefined and the bridge serves no context frames.
+ */
+interface SessionProjectionRegistryService {
+  onChanged(listener: (session: Session, key: string, value: unknown, seq: number) => void): () => void
+  snapshot(session: Session): ProjectionSnapshotLike
 }
 
 /**
@@ -287,6 +303,78 @@ export function apply(ctx: Context): void {
     for (const client of [...sseClients]) {
       try { client.write(frame) } catch { sseClients.delete(client) }
     }
+  }
+
+  /** Loopback base URL of the web server the plugin is mounted on (the /api RPC carrier). */
+  const webBaseUrl = `http://127.0.0.1:${webServer.port}`
+
+  /** The business result of one host RPC self-call. */
+  type RpcResult = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } }
+
+  /**
+   * Self-call one host RPC over loopback HTTP and unwrap its result. The
+   * bridge proxies `session.models`/`session.selectModel` through the genuine
+   * handlers, so the per-session selection ref (private to the gateway) stays
+   * the single source of truth and parity with the web UI is exact. Returns an
+   * error branch for carrier/unreachable failures, and null only for a
+   * well-formed HTTP response whose body is not a valid server-response.
+   */
+  async function rpcCall(method: string, payload: unknown): Promise<RpcResult | null> {
+    const rpcId = randomUUID()
+    let response: Response
+    try {
+      response = await fetch(`${webBaseUrl}/api/${method}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: rpcRequestFrame(method, rpcId, payload),
+      })
+    } catch (error: unknown) {
+      return {
+        ok: false,
+        error: {
+          code: 'internal',
+          message: `RPC ${method} unreachable: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      }
+    }
+    const text = await response.text()
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: { code: 'internal', message: `RPC ${method} failed: HTTP ${response.status}` },
+      }
+    }
+    return rpcUnwrapResponse(text)
+  }
+
+  /** Map a host RPC error code onto the bridge's HTTP status conventions. */
+  function rpcErrorStatus(code: string): number {
+    switch (code) {
+      case 'model-unavailable': return 400
+      case 'session-not-found': return 404
+      case 'agent-busy':
+      case 'subagent-unauthorized':
+      case 'subagent-parent-unavailable':
+      case 'subagent-not-found':
+      case 'subagent-not-resumable':
+      case 'subagent-delivery-unavailable': return 409
+      default: return 502
+    }
+  }
+
+  /** Read the session's live context occupancy from the projection registry, or undefined when unknown. */
+  function readContextPressure(session: Session): { usedTokens: number; contextWindow: number } | undefined {
+    const registry = ctx.get('sessionProjections') as SessionProjectionRegistryService | undefined
+    const pressure = registry?.snapshot(session).values.contextPressure as
+      { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown } | undefined
+    if (pressure === undefined) return undefined
+    const used = contextUsedTokens(
+      typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : undefined,
+      typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens : undefined,
+    )
+    const window = typeof pressure.contextWindow === 'number' ? pressure.contextWindow : undefined
+    if (used === undefined || window === undefined) return undefined
+    return { usedTokens: used, contextWindow: window }
   }
 
   /** Whether a live session is owned by its live parent agent. */
@@ -506,6 +594,29 @@ export function apply(ctx: Context): void {
     if (event.type === 'session/title') {
       broadcast(sessionsChangedMessage(id))
     }
+  })
+
+  // Push live context occupancy onto the SSE stream. The token-meter projection
+  // registry owns the change feed; when the deployment mounts it, every
+  // `contextPressure` update for a targetable session becomes a `context` frame
+  // (matching the web meter's projected value). A profile without the registry
+  // never activates this child, so Emacs simply sees no context frames.
+  ctx.inject(['sessionProjections'], (projectionCtx) => {
+    const registry = projectionCtx.get('sessionProjections') as SessionProjectionRegistryService
+    registry.onChanged((session, key, value) => {
+      if (key !== 'contextPressure') return
+      if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
+      const pressure = value as
+        { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown } | undefined
+      if (pressure === undefined) return
+      const used = contextUsedTokens(
+        typeof pressure.pressureTokens === 'number' ? pressure.pressureTokens : undefined,
+        typeof pressure.projectedTokens === 'number' ? pressure.projectedTokens : undefined,
+      )
+      const window = typeof pressure.contextWindow === 'number' ? pressure.contextWindow : undefined
+      if (used === undefined || window === undefined) return
+      broadcast(contextMessage(String(session.id), used, window))
+    })
   })
 
   // Announce inventory changes: create/dispose and workspace domain mutations
@@ -819,6 +930,92 @@ export function apply(ctx: Context): void {
             replies: assistantReplies(target.agent.session.deriveMessages()).reverse(),
             running: ctx.agents.get(String(target.session.id))?.status === 'running',
           })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // The prompt buffer's model catalog: proxy the host's genuine
+      // `session.models` RPC so the private per-session selection ref (the
+      // process-local `picked` tier) is the source of truth — parity with the
+      // web UI is exact by construction. The catalog is forwarded verbatim.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/models') {
+        try {
+          const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+          const result = await rpcCall('session.models', { sessionId: String(target.session.id) })
+          if (result === null) {
+            sendJson(res, 502, { error: 'model catalog RPC returned a malformed response' })
+            return
+          }
+          if (!result.ok) {
+            sendJson(res, rpcErrorStatus(result.error.code), { error: result.error.message })
+            return
+          }
+          sendJson(res, 200, result.value)
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // Change the target session's model: proxy `session.selectModel` (which
+      // validates, sets the session-local pick, and persists the default).
+      if (req.method === 'POST' && pathname === '/dsh-bridge/model') {
+        try {
+          const body = (await readJson(req)) as
+            { sessionId?: unknown; provider?: unknown; model?: unknown; reasoningEffort?: unknown } | undefined
+          const provider = typeof body?.provider === 'string' ? body.provider : ''
+          const model = typeof body?.model === 'string' ? body.model : ''
+          if (provider === '' || model === '') {
+            sendJson(res, 400, { error: 'provider and model are required' })
+            return
+          }
+          let explicitId: string | undefined
+          if (body?.sessionId !== undefined && body.sessionId !== null) {
+            if (typeof body.sessionId !== 'string') {
+              sendJson(res, 400, { error: 'sessionId must be a string' })
+              return
+            }
+            explicitId = body.sessionId
+          }
+          const target = await resolveTarget(explicitId)
+          const payload: { sessionId: string; provider: string; model: string; reasoningEffort?: string } = {
+            sessionId: String(target.session.id),
+            provider,
+            model,
+            ...(typeof body?.reasoningEffort === 'string' && body.reasoningEffort !== ''
+              ? { reasoningEffort: body.reasoningEffort }
+              : {}),
+          }
+          const result = await rpcCall('session.selectModel', payload)
+          if (result === null) {
+            sendJson(res, 502, { error: 'select-model RPC returned a malformed response' })
+            return
+          }
+          if (!result.ok) {
+            sendJson(res, rpcErrorStatus(result.error.code), { error: result.error.message })
+            return
+          }
+          const selected = (result.value as { selected?: unknown } | undefined)?.selected
+          sendJson(res, 200, { ok: true, sessionId: payload.sessionId, selected })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // The prompt buffer's context occupancy: the live projection registry's
+      // current value, or 204 when no sample/capacity exists yet.
+      if (req.method === 'GET' && pathname === '/dsh-bridge/context') {
+        try {
+          const target = await resolveTarget(url.searchParams.get('sessionId') ?? undefined)
+          const context = readContextPressure(target.session)
+          if (context === undefined) {
+            sendJson(res, 204, {})
+            return
+          }
+          sendJson(res, 200, { sessionId: String(target.session.id), ...context })
         } catch (error: unknown) {
           sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }

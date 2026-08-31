@@ -471,3 +471,56 @@ export function sessionsChangedMessage(sessionId?: string): string {
     : { kind: 'sessions-changed', sessionId }
   return `data: ${JSON.stringify(payload)}\n\n`
 }
+
+/** One client-request RPC envelope: the POST /api/<method> body. RPC-ID is the caller-minted correlation id echoed in the response. */
+export function rpcRequestFrame(method: string, rpcId: string, payload: unknown): string {
+  return JSON.stringify({ type: 'client-request', rpcId, method, payload })
+}
+
+/**
+ * Unwrap one server-response RPC body into its business result, or null when
+ * the body is not a valid `server-response` (transport/carrier failures are the
+ * caller's concern, not this function's). The error branch carries the RPC
+ * error code and message; anything unrecognised collapses to `internal`.
+ */
+export function rpcUnwrapResponse(
+  text: string,
+): { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } } | null {
+  try {
+    const parsed = JSON.parse(text) as { type?: unknown; result?: unknown }
+    if (parsed.type !== 'server-response') return null
+    const result = parsed.result as { ok?: unknown; value?: unknown; error?: unknown } | undefined | null
+    if (result === undefined || result === null || typeof result !== 'object') return null
+    if (result.ok === true) return { ok: true, value: result.value }
+    if (result.ok === false) {
+      const error = result.error as { code?: unknown; message?: unknown } | undefined | null
+      return {
+        ok: false,
+        error: {
+          code: typeof error?.code === 'string' ? error.code : 'internal',
+          message: typeof error?.message === 'string' ? error.message : 'unknown error',
+        },
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The context-occupancy numerator the web meter uses: the projected
+ * next-prompt size when one exists, else the last provider-reported sample.
+ * Returns undefined when neither is present (nothing to display).
+ */
+export function contextUsedTokens(
+  pressureTokens: number | undefined,
+  projectedTokens: number | undefined,
+): number | undefined {
+  return projectedTokens ?? pressureTokens
+}
+
+/** One SSE `data:` frame carrying a session's context occupancy, matching the web meter. */
+export function contextMessage(sessionId: string, usedTokens: number, contextWindow: number): string {
+  return `data: ${JSON.stringify({ kind: 'context', sessionId, usedTokens, contextWindow })}\n\n`
+}

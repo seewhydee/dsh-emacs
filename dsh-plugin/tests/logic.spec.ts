@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   assistantReplies,
   classifySessionId,
+  contextMessage,
+  contextUsedTokens,
   draftMessage,
   hostnameOf,
   isLoopbackAddress,
@@ -15,6 +17,8 @@ import {
   outboxSessionId,
   parseBearerAuthorization,
   resolveTargetId,
+  rpcRequestFrame,
+  rpcUnwrapResponse,
   sessionTitle,
   sessionsChangedMessage,
   tokenRequestsSameOrigin,
@@ -483,6 +487,53 @@ describe('sessionsChangedMessage', () => {
   it('emits a frame naming the changed session when one is given', () => {
     expect(sessionsChangedMessage('session-1')).toBe(
       'data: {"kind":"sessions-changed","sessionId":"session-1"}\n\n',
+    )
+  })
+})
+
+describe('rpcRequestFrame', () => {
+  it('emits a client-request envelope with the method, id, and payload', () => {
+    expect(rpcRequestFrame('session.models', 'rpc-1', { sessionId: 's1' })).toBe(
+      '{"type":"client-request","rpcId":"rpc-1","method":"session.models","payload":{"sessionId":"s1"}}',
+    )
+  })
+})
+
+describe('rpcUnwrapResponse', () => {
+  it('unwraps an ok result', () => {
+    expect(rpcUnwrapResponse('{"type":"server-response","rpcId":"r","result":{"ok":true,"value":{"a":1}}}'))
+      .toEqual({ ok: true, value: { a: 1 } })
+  })
+
+  it('unwraps an error result with its code and message', () => {
+    expect(rpcUnwrapResponse('{"type":"server-response","rpcId":"r","result":{"ok":false,"error":{"code":"model-unavailable","message":"nope","details":{}}}}'))
+      .toEqual({ ok: false, error: { code: 'model-unavailable', message: 'nope' } })
+  })
+
+  it('collapses a malformed error into the internal code', () => {
+    expect(rpcUnwrapResponse('{"type":"server-response","rpcId":"r","result":{"ok":false}}'))
+      .toEqual({ ok: false, error: { code: 'internal', message: 'unknown error' } })
+  })
+
+  it('returns null for a non-server-response or invalid body', () => {
+    expect(rpcUnwrapResponse('{"type":"client-request"}')).toBeNull()
+    expect(rpcUnwrapResponse('not json')).toBeNull()
+  })
+})
+
+describe('contextUsedTokens', () => {
+  it('prefers the projected value over the pressure sample', () => {
+    expect(contextUsedTokens(12000, 11500)).toBe(11500)
+    expect(contextUsedTokens(12000, undefined)).toBe(12000)
+    expect(contextUsedTokens(undefined, 11500)).toBe(11500)
+    expect(contextUsedTokens(undefined, undefined)).toBeUndefined()
+  })
+})
+
+describe('contextMessage', () => {
+  it('emits one SSE data frame with the occupancy figures', () => {
+    expect(contextMessage('session-1', 45000, 100000)).toBe(
+      'data: {"kind":"context","sessionId":"session-1","usedTokens":45000,"contextWindow":100000}\n\n',
     )
   })
 })

@@ -41,6 +41,15 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
     route: Emacs distinguishes "not running" / "not loaded" / "stale" and can
     compare the running version against the bundled one after an upgrade.
   - `GET /events?token=` → SSE stream (composer-draft push + outbox notices).
+  - `GET /models?sessionId=` / `POST /model { sessionId, provider, model,
+    reasoningEffort? }` → thin REST↔RPC adapters that self-call the host's own
+    `session.models` / `session.selectModel` over loopback HTTP (the genuine
+    handlers own the private per-session selection ref, so parity with the web
+    UI is exact by construction).
+  - `GET /context?sessionId=` → the latest `{ usedTokens, contextWindow }`
+    from the token-meter `contextPressure` projection (204 when unknown), and
+    a `{ kind:"context", sessionId, usedTokens, contextWindow }` SSE frame
+    rebroadcast from `ctx.sessionProjections.onChanged`.
 - Auth: shared bearer token at `$DSH_HOME/dsh-bridge-token` (generated on
   first use, mode 0600), required on every route except the two above.
 - Targeting: no host-side pin. A request without `sessionId` resolves to the
@@ -66,7 +75,13 @@ pursuing the Emacs-as-primary-client (ACP-style) model.
 - `dsh-bridge-view-mode`: read-only reply buffer with GFM font-lock (when
   markdown-mode is installed), `M-p`/`M-n` reply navigation, copy, refetch.
 - `dsh-bridge-prompt-mode`: markdown-derived composition buffer with prompt
-  history (`M-p`/`M-n`), `C-c C-c` send / `C-c C-d` draft.
+  history (`M-p`/`M-n`), `C-c C-c` send / `C-c C-d` draft, and `C-c C-m`
+  model selection (`completing-read` over the host catalog, with a second
+  reasoning-effort prompt when the model advertises efforts).  The prompt
+  header line shows `<glyph> <label> · <model> · <ctx%> [ ✓ sent HH:MM]`,
+  fed by the `dsh-bridge--session-models` / `dsh-bridge--session-context`
+  read-through caches (model refresh on open/rebind/turn frames/select;
+  context via the `context` SSE frame plus a `GET /context` seed).
 - Session selection is Emacs-side: a default target session plus per-buffer
   session bindings; commands fall back to last-active.
 - SSE notification consumer (`make-network-process`, chunked decoding,

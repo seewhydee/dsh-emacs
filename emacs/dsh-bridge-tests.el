@@ -1879,27 +1879,6 @@ Exit statuses are integers and 1 is truthy, so this guards the `zerop'."
               ((symbol-function 'message) (lambda (&rest _) nil)))
       (should-error (dsh-bridge-uninstall-plugin) :type 'user-error))))
 
-(ert-deftest dsh-bridge-first-load-notice-skips-cli-when-installed ()
-  "An installed plugin short-cuits the notice before CLI auto-detection."
-  (let ((dsh-bridge--first-load-notice-done nil) (msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'installed))
-              ((symbol-function 'dsh-bridge--dsh-installed-p)
-               (lambda () (error "must not be called")))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge--maybe-first-load-notice))
-    (should (null msg))))
-
-(ert-deftest dsh-bridge-first-load-notice-skips-when-no-dsh ()
-  "No profile and no real CLI (case: no DSH at all) shows no notice."
-  (let ((dsh-bridge--first-load-notice-done nil) (msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'no-profile))
-              ((symbol-function 'dsh-bridge--dsh-installed-p) (lambda () nil))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge--maybe-first-load-notice))
-    (should (null msg))))
-
 (ert-deftest dsh-bridge-plugin-directory-source-load ()
   "plugin-directory returns nil-or-a-dir (never signals) off load-path.
 Loading by path from a source checkout makes `locate-library' nil; the helper
@@ -1907,17 +1886,6 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
   (cl-letf (((symbol-function 'locate-library) (lambda (&rest _) nil)))
     (let ((dir (dsh-bridge--plugin-directory)))   ; must not signal
       (should (or (null dir) (stringp dir))))))
-
-(ert-deftest dsh-bridge-first-load-notice-latched ()
-  "The first-load install pointer fires at most once per session."
-  (let ((dsh-bridge--first-load-notice-done nil) (msgs 0)
-        (dsh-bridge-dsh-command '("dsh")))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'not-installed))
-              ((symbol-function 'message)
-               (lambda (&rest _) (setq msgs (1+ msgs)))))
-      (dsh-bridge--maybe-first-load-notice)
-      (dsh-bridge--maybe-first-load-notice))
-    (should (= msgs 1))))
 
 ;;; Dispatcher and menus
 
@@ -2154,6 +2122,105 @@ and pushed messages."
                 ((symbol-function 'switch-to-buffer) (lambda (&rest _) nil)))
         (dsh-bridge--prompt-exit "s1"))
       (should buried))))
+
+;;; Prompt-buffer model selection and context occupancy
+
+(ert-deftest dsh-bridge-prompt-model-label ()
+  "The model segment reads the catalog display name, with fallbacks."
+  (let ((dsh-bridge--session-models
+         '(("s1" (current . ((provider . "p") (model . "m")))
+            (groups . (((id . "p") (name . "P")
+                        (models . (((id . "m") (name . "Model M")))))))))))
+    (should (equal (dsh-bridge--prompt-model-label "s1") "Model M")))
+  (let ((dsh-bridge--session-models
+         '(("s1" (current . ((provider . "p") (model . "x")))
+            (groups . (((id . "p") (name . "P") (models . (((id . "m") (name . "M")))))))))))
+    (should (equal (dsh-bridge--prompt-model-label "s1") "x")))
+  (let ((dsh-bridge--session-models nil))
+    (should (null (dsh-bridge--prompt-model-label "s1")))))
+
+(ert-deftest dsh-bridge-prompt-context-label ()
+  "The context segment applies the DSH percent formula, clamps, and rounds."
+  (let ((dsh-bridge--session-context '(("s1" . (45000 . 100000)))))
+    (should (equal (dsh-bridge--prompt-context-label "s1") "45%")))
+  (let ((dsh-bridge--session-context '(("s1" . (150000 . 100000)))))
+    (should (equal (dsh-bridge--prompt-context-label "s1") "100%")))
+  (let ((dsh-bridge--session-context '(("s1" . (1 . 3)))))
+    (should (equal (dsh-bridge--prompt-context-label "s1") "33%")))
+  (let ((dsh-bridge--session-context nil))
+    (should (null (dsh-bridge--prompt-context-label "s1")))))
+
+(ert-deftest dsh-bridge-prompt-header-model-context ()
+  "The header appends model and context segments when cached, and omits them
+when the caches are empty."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge--last-sent nil)
+        (dsh-bridge--session-models
+         '(("s1" (current . ((provider . "p") (model . "m")))
+            (groups . (((id . "p") (name . "P")
+                        (models . (((id . "m") (name . "Model M"))))))))))
+        (dsh-bridge--session-context '(("s1" . (45000 . 100000)))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (let ((header (dsh-bridge--prompt-header-line)))
+        (should (string-match-p "Model M" header))
+        (should (string-match-p "45%" header)))))
+  (let ((dsh-bridge--session-models nil)
+        (dsh-bridge--session-context nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (should-not (string-match-p " · " (dsh-bridge--prompt-header-line))))))
+
+(ert-deftest dsh-bridge-model-catalog ()
+  "The catalog flattens provider groups into provider/model triples."
+  (let ((data '((groups .
+                  (((id . "p1") (name . "P1")
+                    (models . (((id . "m1") (name . "M1"))
+                               ((id . "m2") (name . "M2")))))
+                   ((id . "p2") (name . "P2")
+                    (models . (((id . "m3") (name . "M3"))))))))))
+    (let ((catalog (dsh-bridge--model-catalog data)))
+      (should (equal (mapcar #'car catalog) '("p1/m1" "p1/m2" "p2/m3")))
+      (should (equal (cadr (assoc "p1/m2" catalog)) "p1"))
+      (should (equal (alist-get 'id (caddr (assoc "p2/m3" catalog))) "m3")))))
+
+(ert-deftest dsh-bridge-fetch-models-cache ()
+  "fetch-models caches per session and force-refreshes."
+  (let ((dsh-bridge--session-models nil) (calls 0))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (method path _payload)
+                 (setq calls (1+ calls))
+                 (should (equal method "GET"))
+                 (should (equal path "/models?sessionId=s1"))
+                 (cons 200 '((current . ((provider . "p") (model . "m")))
+                             (groups . nil))))))
+      (dsh-bridge--fetch-models "s1")
+      (dsh-bridge--fetch-models "s1")
+      (should (= calls 1))
+      (dsh-bridge--fetch-models "s1" t)
+      (should (= calls 2)))))
+
+(ert-deftest dsh-bridge-fetch-context ()
+  "fetch-context seeds the cache once and skips when cached."
+  (let ((dsh-bridge--session-context nil) (calls 0))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload)
+                 (setq calls (1+ calls))
+                 (cons 200 '((usedTokens . 45) (contextWindow . 100000))))))
+      (should (equal (dsh-bridge--fetch-context "s1") (cons 45 100000)))
+      (dsh-bridge--fetch-context "s1")
+      (should (= calls 1)))))
+
+(ert-deftest dsh-bridge-notification-context ()
+  "A context SSE frame folds into the session-context cache."
+  (let ((dsh-bridge--session-context nil))
+    (dsh-bridge--notification-handle-events
+     '(((kind . "context") (sessionId . "s1") (usedTokens . 45) (contextWindow . 100000))))
+    (should (equal (assoc "s1" dsh-bridge--session-context) '("s1" 45 . 100000)))))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

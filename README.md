@@ -188,10 +188,18 @@ The following commands are available from the DSH-Prompt buffer:
 * `C-c C-c` — send the region, or the whole buffer, as a prompt.  On
   success, bury the buffer.
 * `C-c C-d` — push it to the DSH composer as a draft instead.
+* `C-c C-m` — select the session's model (and reasoning effort) from the
+  host's catalog, via `completing-read`.
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
 * `M-p` / `M-n` — walk the session's prompt history.
+
+The header line shows the session's status glyph, the target session
+label, the current model's display name, the context-window occupancy as a
+percentage (matching the web UI's meter), and a `✓ sent HH:MM` marker after
+a send.  The model and occupancy segments stay empty until their first
+successful fetch.
 
 When `markdown-mode` is installed, this buffer derives from it, so
 most markdown editing commands are also available.

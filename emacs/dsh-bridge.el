@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -68,7 +68,7 @@
 (require 'json)
 (require 'transient)
 
-(defconst dsh-bridge-version "0.2.0"
+(defconst dsh-bridge-version "0.3.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -266,6 +266,20 @@ created and toggled by `v'.")
 This variable is seeded from the sessions list managed by the DSH
 plugin, and then updated based on turn-start/turn-complete frames in the
 notification stream.")
+
+(defvar dsh-bridge--session-models nil
+  "Alist of (SESSION-ID . MODEL-DATA) for the prompt buffer's model catalog.
+MODEL-DATA is the decoded `GET /dsh-bridge/models' response (`current' plus
+`groups').  A read-through display cache only: the host's per-session
+selection is the single source of truth, refreshed on prompt open, on `C-c
+C-s' rebind, on turn SSE frames, and after a successful
+`dsh-bridge-select-model'.")
+
+(defvar dsh-bridge--session-context nil
+  "Alist of (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)) context occupancy.
+Folded from the host's `context' SSE frames and seeded from
+`GET /dsh-bridge/context'.  The prompt header renders nothing until both
+numbers are known for the targeted session.")
 
 (defun dsh-bridge--status-set (session-id state)
   "Record SESSION-ID's status as STATE (`running' or `idle')."
@@ -798,7 +812,15 @@ byte-compiled, so forward refs are harmless here)."
 		  (when id
 			(dsh-bridge--status-set id 'idle)
 			(dsh-bridge--status-event-render id)
-			(dsh-bridge--turn-complete-act id reason))))))))
+			(dsh-bridge--turn-complete-act id reason))))
+	   ((equal kind "context")
+		(let ((id (alist-get 'sessionId event))
+			  (used (alist-get 'usedTokens event))
+			  (window (alist-get 'contextWindow event)))
+		  (when (and id (numberp used) (numberp window))
+			(setq dsh-bridge--session-context
+				  (assoc-delete-all id dsh-bridge--session-context))
+			(push (cons id (cons used window)) dsh-bridge--session-context))))))))
 
 (defvar dsh-bridge--sessions-changed-timer nil
   "Timer for the debounced sessions-list refetch after a `sessions-changed' frame.")
@@ -1601,15 +1623,21 @@ recomputes on the next redisplay)."
 	  "")))
 
 (defun dsh-bridge--prompt-header-line ()
-  "Header line for the prompt buffer: status, session, qualifier, sent marker.
-`<status> <label>[<qualifier>][ ✓ sent HH:MM]' — recomputed on redisplay from
-caches only (the buffer's `(:eval ...)' header).  Editing the text clears the
-`✓ sent' marker with no event plumbing."
+  "Header line for the prompt buffer: status, session, model, context, sent.
+`<status> <label>[ · <model>][ · <ctx%>][ ✓ sent HH:MM]' — recomputed on
+redisplay from caches only (the buffer's `(:eval ...)' header).  The model and
+context segments stay empty until their first successful fetch.  Editing the
+text clears the `✓ sent' marker with no event plumbing."
   (let* ((session (dsh-bridge--prompt-status-session))
 		 (status (dsh-bridge--status-glyph session))
 		 (label (dsh-bridge--effective-session-label))
+		 (model (dsh-bridge--prompt-model-label session))
+		 (context (dsh-bridge--prompt-context-label session))
 		 (sent (dsh-bridge--prompt-sent-marker session)))
-	(concat " " (if (string-empty-p status) label (concat status " " label)) sent)))
+	(concat " " (if (string-empty-p status) label (concat status " " label))
+			(and model (concat " · " model))
+			(and context (concat " · " context))
+			sent)))
 
 (defvar dsh-bridge-view-mode-map)
 
@@ -1980,6 +2008,166 @@ cache knows it (outbox entries carry no `cwd', so this is best-effort)."
 		 (text (or (alist-get 'text entry) "")))
 	(dsh-bridge--fill-output-from-text session-id text (alist-get 'ts entry))))
 
+;;; Prompt-buffer model selection and context occupancy
+
+(defun dsh-bridge--fetch-models (session-id &optional force)
+  "Fetch and cache the model catalog for SESSION-ID, returning its value.
+When FORCE is nil and SESSION-ID has a cached entry, return it without a
+request (the read-through display cache).  Returns nil on failure."
+  (when session-id
+    (when (or force (null (assoc session-id dsh-bridge--session-models)))
+      (let* ((result (dsh-bridge--request "GET" (dsh-bridge--path "/models" session-id) nil))
+             (status (car result))
+             (alist (cdr result)))
+        (when (and (eq status 200) alist)
+          (setq dsh-bridge--session-models
+                (assoc-delete-all session-id dsh-bridge--session-models))
+          (push (cons session-id alist) dsh-bridge--session-models))))
+    (cdr (assoc session-id dsh-bridge--session-models))))
+
+(defun dsh-bridge--fetch-context (session-id)
+  "Seed the context cache for SESSION-ID from GET /context, when uncached.
+Returns the (USED-TOKENS . CONTEXT-WINDOW) entry, or nil when unknown."
+  (when (and session-id (null (assoc session-id dsh-bridge--session-context)))
+    (let* ((result (dsh-bridge--request "GET" (dsh-bridge--path "/context" session-id) nil))
+           (status (car result))
+           (alist (cdr result)))
+      (when (and (eq status 200) alist
+                 (numberp (alist-get 'usedTokens alist))
+                 (numberp (alist-get 'contextWindow alist)))
+        (setq dsh-bridge--session-context
+              (assoc-delete-all session-id dsh-bridge--session-context))
+        (push (cons session-id (cons (alist-get 'usedTokens alist)
+                                     (alist-get 'contextWindow alist)))
+              dsh-bridge--session-context))))
+  (cdr (assoc session-id dsh-bridge--session-context)))
+
+(defun dsh-bridge--model-display-name (data provider model)
+  "The catalog display name of PROVIDER/MODEL in DATA, or nil.
+Searches the `groups' list for the provider, then its models for the id."
+  (let ((group (seq-find (lambda (g) (equal (alist-get 'id g) provider))
+                         (alist-get 'groups data))))
+    (when group
+      (let ((entry (seq-find (lambda (m) (equal (alist-get 'id m) model))
+                             (alist-get 'models group))))
+        (and entry (alist-get 'name entry))))))
+
+(defun dsh-bridge--prompt-model-label (session-id)
+  "The prompt header's model segment for SESSION-ID, or nil when unknown.
+The catalog's display name, falling back to the raw model id; nil until the
+first GET /models succeeds for the session."
+  (let ((data (and session-id (cdr (assoc session-id dsh-bridge--session-models)))))
+    (when data
+      (let* ((current (alist-get 'current data))
+             (provider (alist-get 'provider current))
+             (model (alist-get 'model current)))
+        (when model
+          (or (dsh-bridge--model-display-name data provider model) model))))))
+
+(defun dsh-bridge--prompt-context-label (session-id)
+  "The prompt header's context-occupancy segment for SESSION-ID, or nil.
+Renders the DSH formula `min(100, round(used/window*100))%'; nil until both
+numbers are known."
+  (let ((entry (and session-id (assoc session-id dsh-bridge--session-context))))
+    (when entry
+      (let ((used (cadr entry))
+            (window (cddr entry)))
+        (when (and (numberp used) (numberp window) (> window 0))
+          (format "%d%%" (min 100 (round (* 100.0 (/ used (float window)))))))))))
+
+(defun dsh-bridge--refresh-prompt-metadata ()
+  "Fetch model/context metadata for the prompt buffer's effective session.
+One request each, only when the session's entry is not already cached.  The
+requests are synchronous loopback (like the other prompt-open requests); a
+failure leaves the header segment empty until the next trigger."
+  (let ((session (dsh-bridge--prompt-status-session)))
+    (when session
+      (dsh-bridge--fetch-models session)
+      (dsh-bridge--fetch-context session))))
+
+(defun dsh-bridge--model-catalog (data)
+  "Flatten DATA's model groups into (PROVIDER/MODEL PROVIDER MODEL-ENTRY) triples.
+MODEL-ENTRY is the catalog model alist (id, name, reasoning)."
+  (let ((result '()))
+    (dolist (group (alist-get 'groups data) (nreverse result))
+      (let ((provider (alist-get 'id group)))
+        (dolist (model (alist-get 'models group))
+          (push (list (format "%s/%s" provider (alist-get 'id model))
+                      provider model)
+                result))))))
+
+(defun dsh-bridge--select-model-apply (session-id provider model effort)
+  "POST /model for SESSION-ID and refresh the model cache on success.
+Returns non-nil on success; the header re-renders on the next redisplay."
+  (let* ((payload (append (list (cons 'sessionId session-id)
+                                (cons 'provider provider)
+                                (cons 'model model))
+                          (and effort (list (cons 'reasoningEffort effort)))))
+         (result (dsh-bridge--request "POST" "/model" payload))
+         (status (car result))
+         (alist (cdr result)))
+    (if (and (eq status 200) alist)
+        (progn
+          (setq dsh-bridge--session-models
+                (assoc-delete-all session-id dsh-bridge--session-models))
+          (dsh-bridge--fetch-models session-id t)
+          (message "dsh-bridge: model %s/%s%s"
+                   provider model (if effort (format " (%s)" effort) ""))
+          t)
+      (message "dsh-bridge: %s" (or (alist-get 'error alist) (format "HTTP %s" status)))
+      nil)))
+
+(defun dsh-bridge-select-model ()
+  "Change the model (and reasoning effort) of the prompt buffer's session.
+Picks from the host's live catalog via `completing-read' (`provider/model'
+candidates annotated with the display name), then posts the selection through
+the genuine `session.selectModel' handler — so the change applies to this
+session and persists as the default, exactly as the web UI does."
+  (interactive)
+  (let* ((session-id (dsh-bridge--prompt-status-session))
+         (data (dsh-bridge--fetch-models session-id t)))
+    (if (null data)
+        (message "dsh-bridge: model catalog unavailable")
+      (let* ((catalog (dsh-bridge--model-catalog data))
+             (current (alist-get 'current data))
+             (current-key (and (alist-get 'provider current) (alist-get 'model current)
+                               (format "%s/%s" (alist-get 'provider current)
+                                       (alist-get 'model current))))
+             (annotation (lambda (cand)
+                           (let ((entry (assoc cand catalog)))
+                             (or (alist-get 'name (caddr entry)) "")))))
+        (if (null catalog)
+            (message "dsh-bridge: no models available")
+          (let ((chosen (completing-read
+                         "Model: "
+                         (lambda (string pred action)
+                           (if (eq action 'metadata)
+                               `(metadata (annotation-function . ,annotation))
+                             (complete-with-action action (mapcar #'car catalog) string pred)))
+                         nil t current-key)))
+            (when (and chosen (not (string-empty-p chosen)))
+              (let* ((entry (assoc chosen catalog))
+                     (provider (cadr entry))
+                     (model-entry (caddr entry))
+                     (reasoning (alist-get 'reasoning model-entry))
+                     (efforts (and reasoning (alist-get 'efforts reasoning)))
+                     (effort nil))
+                (when efforts
+                  (let* ((by-name (mapcar (lambda (e) (cons (alist-get 'name e) (alist-get 'id e)))
+                                          efforts))
+                         (current-effort (alist-get 'reasoningEffort current))
+                         (default-name
+                          (or (and current-effort (car (rassoc current-effort by-name)))
+                              (let ((d (alist-get 'defaultEffort reasoning)))
+                                (and d (car (rassoc d by-name)))))))
+                    (setq effort
+                          (cdr (assoc (completing-read "Reasoning effort: "
+                                                       (mapcar #'car by-name)
+                                                       nil t default-name)
+                                      by-name)))))
+                (dsh-bridge--select-model-apply
+                 session-id provider (alist-get 'id model-entry) effort)))))))))
+
 ;;;###autoload
 (defun dsh-bridge--prompt-buffer ()
   "Return the prompt buffer, ensuring it is in `dsh-bridge-prompt-mode'."
@@ -1988,7 +2176,9 @@ cache knows it (outbox entries carry no `cwd', so this is best-effort)."
 	  (unless (eq major-mode 'dsh-bridge-prompt-mode)
 		(dsh-bridge-prompt-mode))
 	  ;; Compose in the effective session's workspace.
-	  (dsh-bridge--refresh-prompt-directory))
+	  (dsh-bridge--refresh-prompt-directory)
+	  ;; Seed the header's model/context segments for the effective session.
+	  (dsh-bridge--refresh-prompt-metadata))
 	buffer))
 
 ;;;###autoload
@@ -2098,6 +2288,7 @@ stay reachable via the menu."
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-d") #'dsh-bridge-draft)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-k") #'dsh-bridge-erase-prompt)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-f") #'dsh-bridge-fetch)
+(define-key dsh-bridge-prompt-mode-map (kbd "C-c C-m") #'dsh-bridge-select-model)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-s") #'dsh-bridge-set-buffer-session)
 (define-key dsh-bridge-prompt-mode-map (kbd "C-c C-l") #'dsh-bridge-list-sessions)
 (define-key dsh-bridge-prompt-mode-map (kbd "M-p")
@@ -2135,6 +2326,8 @@ the default target again.  Only this buffer is affected."
 	"---"
 	["Fetch Latest Reply" dsh-bridge-fetch
 	 :help "Fetch the effective session's latest reply into *dsh-bridge-output*"]
+	["Select Model…" dsh-bridge-select-model
+	 :help "Change the session's model and reasoning effort"]
 	["Set Prompt Session…" dsh-bridge-set-buffer-session
 	 :help "Rebind this buffer's session (or follow the default target)"]
 	["List Sessions" dsh-bridge-list-sessions
@@ -2180,7 +2373,10 @@ would now target a different session."
 	  (message "dsh-bridge: unsent text remains"))
 	(setq-local dsh-bridge--prompt-session session-id)
 	(setq header-line-format '(:eval (dsh-bridge--prompt-header-line)))
-	(dsh-bridge--apply-session-directory session-id nil (current-buffer))))
+	(dsh-bridge--apply-session-directory session-id nil (current-buffer))
+	;; Rebind invalidates the old session's model/context in the header, and
+	;; seeds the newly targeted session's entries.
+	(dsh-bridge--refresh-prompt-metadata)))
 
 ;;;###autoload
 (defun dsh-bridge-set-default-target (session-id)
