@@ -766,8 +766,8 @@ un-pauses it.")
 
 (defun dsh-bridge--chunked-decode (text)
   "Decode HTTP/1.1 chunked-transfer-encoded TEXT (a unibyte string).
-Return (DECODED . REST): DECODED is the decoded body prefix, REST is the raw
-trailing text of an incomplete chunk, to be completed by a later call."
+Return (DECODED . REST), where DECODED is the decoded body prefix, and
+REST is the raw trailing text of an incomplete chunk."
   (let ((chunks nil)
 		(rest text))
 	(catch 'done
@@ -809,15 +809,14 @@ text with no complete event terminator."
 	(cons (nreverse events) rest)))
 
 (defun dsh-bridge--notification-handle-events (events)
-  "Dispatch decoded SSE EVENTS for the bridge's own concerns.
-`turn-start`/`turn-complete` update the status tracker, re-render the
-affected surfaces, and refresh the model cache (a turn boundary is when a
-web-UI model change takes effect); `sessions-changed` debounces a
+  "Dispatch decoded SSE EVENTS for the DSH bridge.
+`turn-start'/`turn-complete' update the status tracker, re-render the
+affected surfaces, and refresh the model cache (a turn boundary is when
+a web-UI model change takes effect); `sessions-changed' debounces a
 sessions-list refetch; outbox notices are handled by the caller
-(`receive').	The view/prompt render helpers are defined later in this file
-(resolved at runtime; the package is not byte-compiled, so forward refs are
-harmless here)."
-  (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed")) events)
+(`receive')."
+  (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed"))
+				  events)
 	(dsh-bridge--notification-sessions-changed))
   (dolist (event events)
 	(let ((kind (alist-get 'kind event)))
@@ -846,12 +845,12 @@ harmless here)."
 			(push (cons id (cons used window)) dsh-bridge--session-context))))))))
 
 (defvar dsh-bridge--sessions-changed-timer nil
-  "Timer for the debounced sessions-list refetch after a `sessions-changed' frame.")
+  "Timer for debounced sessions-list refetch after a `sessions-changed' frame.")
 
 (defun dsh-bridge--notification-sessions-changed ()
-  "Debounce a `*dsh-bridge-sessions*' refetch after a sessions-changed frame.
-Refetches when the list is live, preserving point by session id.  Coalesces a
-burst of frames (a rename or archive storms several events) into one refresh."
+  "Debounce a DSH-Sessions refetch after a sessions-changed frame.
+Refetch if list is live, preserving point by session id.  Coalesce a
+burst of frames (e.g., a rename) into one refresh."
   (when (timerp dsh-bridge--sessions-changed-timer)
 	(cancel-timer dsh-bridge--sessions-changed-timer)
 	(setq dsh-bridge--sessions-changed-timer nil))
@@ -862,11 +861,9 @@ burst of frames (a rename or archive storms several events) into one refresh."
 		  (run-at-time 0.5 nil #'dsh-bridge--refresh-sessions-buffer))))
 
 (defun dsh-bridge--notification-receive ()
-  "Receive once for a pending push notification."
+  "Receive a pending DSH push notification."
   (setq dsh-bridge--notifications-receive-pending nil)
-  ;; `dsh-bridge-receive' is defined later in this file; call it via its
-  ;; symbol so the byte-compiler does not flag a forward reference.
-  (funcall 'dsh-bridge-receive))
+  (funcall 'dsh-bridge-receive)) ; defined below
 
 (defun dsh-bridge--notification-filter (_proc string)
   "Process filter for the SSE notification connection: decode and dispatch."
@@ -940,9 +937,9 @@ burst of frames (a rename or archive storms several events) into one refresh."
 			 (url-filename parsed) (url-hexify-string token) host port))))
 
 (defun dsh-bridge-notifications-start ()
-  "Connect the bridge notification listener (idempotent).
-Clears the pause latch so the listener stays connected until
-`dsh-bridge-notifications-stop' is called again."
+  "Connect the DSH bridge notification listener.
+This function is idempotent.  It clears the pause latch, so the listener
+works until `dsh-bridge-notifications-stop' is called again."
   (interactive)
   (setq dsh-bridge--notifications-paused nil)
   (setq dsh-bridge--notifications-enabled t)
@@ -959,11 +956,8 @@ Clears the pause latch so the listener stays connected until
 		  (error (dsh-bridge--notifications-retry)))))))
 
 (defun dsh-bridge-notifications-stop ()
-  "Pause the bridge notification listener (latched until `…-start').
-The listener stays off for the rest of the session (and is not re-armed by a
-later bridge use) until `dsh-bridge-notifications-start' is called.  This is
-the manual off switch: the channel is otherwise always subscribed on first
-bridge use."
+  "Pause the DSH bridge notification listener.
+The listener stays off until `dsh-bridge-notifications-start' is called."
   (interactive)
   (setq dsh-bridge--notifications-paused t)
   (setq dsh-bridge--notifications-enabled nil)
