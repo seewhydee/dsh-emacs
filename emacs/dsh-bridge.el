@@ -69,6 +69,10 @@
 (require 'json)
 (require 'transient)
 
+(defconst dsh-bridge-version "0.2.0"
+  "Version string for the DSH-Bridge package.
+This should match the version reported by the running DSH plugin.")
+
 ;;; Customize options
 
 (defgroup dsh-bridge nil
@@ -330,7 +334,7 @@ The choice of string contents is based on `dsh-bridge--status-state'."
 ;; necessary DSH plugin, including offering to install the plugin.
 
 (defun dsh-bridge--detect-npm-launcher ()
-  "Helper function to auto-detect an npm command for launching DSH."
+  "Helper function to auto-detect an npm command to launch `dsh'."
   (let ((npm (executable-find "npm"))
 		prefix)
 	(and npm
@@ -343,14 +347,21 @@ The choice of string contents is based on `dsh-bridge--status-state'."
 							 "Scripts/dsh" "Scripts/dsh.cmd"
 							 "node_modules/.bin/dsh.cmd"))))))
 
-(defun dsh-bridge--dsh-command ()
-  "Return the installed DSH program, or nil if none is available.
-This should be a list of strings, the first being the main command and
-the rest consisting of program arguments.
+(defun dsh-bridge--dsh-installed-p ()
+  "Whether a `dsh' command is available without any download.
+This is non-nil if `dsh-bridge-dsh-command' is set, or `dsh' is on PATH,
+or an npm global install is found; nil if we will be using npx."
+  (or dsh-bridge-dsh-command
+	  (executable-find "dsh")
+	  (dsh-bridge--detect-npm-launcher)))
 
-If `dsh-bridge-dsh-command' is non-nil, use that; otherwise try to
-auto-detect, in order, (i) `dsh' on PATH, (ii) the npm global bin
-directory, and (iii) `npx --yes @deepseek-ai/dsh'."
+(defun dsh-bridge--dsh-command ()
+  "Return the installed DeepSeek Harness command, or nil if none.
+If non-nil, the value is a list of strings, the first being the main
+command and the rest consisting of program arguments.
+
+The result is found by trying `dsh-bridge-dsh-command', then `dsh' on
+PATH, then the npm global bin directory, then `npx --yes @deepseek-ai/dsh'."
   (cond (dsh-bridge-dsh-command
 		 (if (stringp dsh-bridge-dsh-command)
 			 (split-string-and-unquote dsh-bridge-dsh-command)
@@ -359,67 +370,75 @@ directory, and (iii) `npx --yes @deepseek-ai/dsh'."
 		((dsh-bridge--detect-npm-launcher))
 		((executable-find "npx") '("npx" "--yes" "@deepseek-ai/dsh"))))
 
-(defun dsh-bridge--plugin-installed-p ()
-  "Whether the bridge plugin is installed in the DSH profile.
-This works by reading the package.json manifest in DSH's profile
-directory; the plugin counts as installed if it appears in
+(defun dsh-bridge--plugin-install-state ()
+  "Return the DSH bridge plugin's installation state.
+One of `installed' (profile manifest lists the plugin), `not-installed'
+(profile exists but plugin not in manifest), or `no-profile' (no profile
+directory at all, possibly because DSH has never been run here).
+
+This function works by reading the package.json manifest in DSH's
+profile directory; the plugin counts as installed if it appears in
 `dependencies' or in `dsh.profile.bundles'."
-  (let ((manifest (expand-file-name ; get profile's package.json manifest
-				   (format "profiles/%s/package.json" dsh-bridge-profile)
-				   (dsh-bridge--dsh-home)))
-		data)
-	(when (file-readable-p manifest)
-	  (setq data (with-temp-buffer
-				   (insert-file-contents manifest)
-				   (ignore-errors
-					 (json-parse-string (buffer-string)
-										:object-type 'alist
-										:array-type 'list))))
-	  (when data
-		(or (assoc 'dsh-emacs-bridge (alist-get 'dependencies data))
-			(member "dsh-emacs-bridge"
-					(alist-get 'bundles
-							   (alist-get 'profile
-										  (alist-get 'dsh data)))))))))
+  (let* ((dir (expand-file-name (format "profiles/%s" dsh-bridge-profile)
+								(dsh-bridge--dsh-home)))
+		 manifest data)
+	(cond
+	 ((not (file-directory-p dir)) 'no-profile)
+	 ((and (file-readable-p (setq manifest (expand-file-name "package.json" dir)))
+		   (setq data (with-temp-buffer
+						(insert-file-contents manifest)
+						(ignore-errors
+						  (json-parse-string (buffer-string)
+											 :object-type 'alist
+											 :array-type 'list))))
+		   (or (assoc 'dsh-emacs-bridge (alist-get 'dependencies data))
+			   (member "dsh-emacs-bridge"
+					   (alist-get 'bundles
+								  (alist-get 'profile
+											 (alist-get 'dsh data))))))
+	  'installed)
+	 (t 'not-installed))))
 
 (defun dsh-bridge--plugin-directory ()
-  "Return the directory holding the bundled `dsh-emacs-bridge' plugin, or nil.
-The directory must contain the plugin manifest and the built `lib/'
-artifacts.	Two layouts are recognized: the packaged one (a `dsh-plugin'
-subdirectory next to this file, as in the package tar) and the source
-tree one (a `dsh-plugin' directory next to the `emacs/' directory)."
-  ;; `locate-library' finds an installed package (it is on `load-path') but
-  ;; returns nil when the file is loaded by path from a source checkout, so
-  ;; fall back to where this very function was loaded from.
+  "Return the directory holding the bundled DSH plugin, or nil.
+The directory must contain a manifest and built `lib/' artifacts.
+
+Look in two locations: a `dsh-plugin' subdirectory next to this
+file (installed Emacs package), or a `dsh-plugin' directory next to this
+one (as in the source repository for the `dsh-emacs-bridge' project)."
   (let* ((lib-file (or (locate-library "dsh-bridge")
 					   (symbol-file 'dsh-bridge--plugin-directory)))
 		 (here (and lib-file (file-name-directory lib-file))))
 	(when here
 	  (seq-find (lambda (dir)
-				  (and (file-exists-p (expand-file-name "package.json" dir))
+				  (and (file-directory-p dir)
+					   (file-exists-p (expand-file-name "package.json" dir))
 					   (file-exists-p (expand-file-name "lib/index.js" dir))
 					   dir))
 				(list (expand-file-name "dsh-plugin" here)
 					  (expand-file-name "../dsh-plugin" here))))))
 
-(defvar dsh-bridge--plugin-state nil
-  "Cached DSH bridge plugin state, or nil if not yet probed.
-The possible non-nil values are `running', `not-running', `unreachable',
-and `forbidden'.  The cache is set per-session, and is reset if a real
-request contradicts it or an install/uninstall runs.")
+(defvar dsh-bridge--bridge-status-cache nil
+  "Cached DSH bridge interface state, or nil if not yet probed.
+Possible values are nil, `running', `not-running', `unreachable', and
+`forbidden'.  The cache is set per-session, and reset if a real request
+contradicts it or an install/uninstall runs.")
 
-(defun dsh-bridge--plugin-state-probe ()
-  "Probe the status of the DSH bridge plugin.
-Possible values: `running', `not-running', `unreachable', `forbidden'.
+(defun dsh-bridge--bridge-status ()
+  "Probe the status of the DSH bridge interface.
+Possible values: `running', `not-running', `incompatible',
+`unreachable', and `forbidden'.
 
-This helper function for `dsh-bridge--ensure-plugin' works by requesting
-\"GET /dsh-bridge/token\" (which is auth-free and loopback-fenced).  The
-results are determined by the response body, not the HTTP status alone."
+This function works by requesting \"GET /dsh-bridge/status\" (which is
+auth-free and loopback-fenced).  If the bridge is running, the plugin
+version is checked against `dsh-bridge-version'; the return value is
+`running' if the version matches, `incompatible' otherwise.  Any other
+response means the route (and hence the plugin) is absent."
   (let* ((url-request-method "GET")
 		 (url-request-data nil)
 		 (url-request-extra-headers nil)
 		 (buf (ignore-errors
-				(url-retrieve-synchronously (concat dsh-bridge-url "/token")
+				(url-retrieve-synchronously (concat dsh-bridge-url "/status")
 											t nil dsh-bridge-timeout))))
 	(if (null buf)
 		'unreachable
@@ -428,169 +447,95 @@ results are determined by the response body, not the HTTP status alone."
 							url-http-response-status)))
 			 (body (dsh-bridge--response-body buf))
 			 (alist (ignore-errors
-					  (json-parse-string body :object-type 'alist)))
-			 (token (and alist (alist-get 'token alist))))
+					  (json-parse-string body :object-type 'alist))))
 		(kill-buffer buf)
 		(cond
 		 ((eq status 403) 'forbidden)
-		 ((and (stringp token) (not (string-empty-p token))) 'running)
+		 ((and (eq status 200)
+			   (equal (alist-get 'name alist) "dsh-emacs-bridge"))
+		  (let ((version (alist-get 'version alist)))
+			(if (and (stringp version)
+					 (equal version dsh-bridge-version))
+				'running
+			  'incompatible)))
 		 (t 'not-running))))))
 
 (defun dsh-bridge--note-request-failure ()
-  "Drop the probe cache when a real request contradicts it.
-Callers invoke this on a transport failure or a 401/404.  A failure while
-the cache believes the plugin is running (or the server was reachable) is
-evidence the state changed; a 404 while the cache already says
-`not-running' is the steady state and must not re-probe."
-  (when (memq dsh-bridge--plugin-state '(running unreachable))
-	(setq dsh-bridge--plugin-state nil)))
-
-;; The fallback handler: diagnosis first, install offer second.
+  "Clear the DSH bridge status cache when a real request contradicts it.
+Callers invoke this on a transport failure or a 401/404."
+  (if (memq dsh-bridge--bridge-status-cache '(running unreachable))
+	  (setq dsh-bridge--bridge-status-cache nil)))
 
 (defvar dsh-bridge--plugin-diagnosed nil
-  "Non-nil once the plugin's absence has been diagnosed this session.")
-
-(defvar dsh-bridge--plugin-version-checked nil
-  "Non-nil once the running plugin's version was compared this session.")
-
-(defun dsh-bridge--plugin-diagnosed-reset ()
-  "Re-arm the plugin diagnosis (after an install or uninstall)."
-  (setq dsh-bridge--plugin-diagnosed nil)
-  (setq dsh-bridge--plugin-version-checked nil))
+  "Non-nil once the DSH plugin's problem has been diagnosed this session.")
 
 (defun dsh-bridge--offer-plugin-install (diagnosis question)
   "Offer to install the bridge plugin.
-DIAGNOSIS is a sentence stating what is wrong (also used for the plain
-report when the offer is disabled); QUESTION is the y-or-n question to ask.
-Falls back to a message naming the manual command when no `dsh' CLI /
-`pnpm' is available.  When the resolved CLI is the npx fallback, the
-question discloses that its first run may download the CLI."
-  (let ((dir (dsh-bridge--plugin-directory))
-		(cmd (dsh-bridge--dsh-command)))
-	(cond
-	 ((null dir)
-	  (message "dsh bridge: no bundled plugin found; install from the source tree (see the README)"))
-	 ((null cmd)
-	  (message "dsh bridge: no `dsh' CLI found — set `dsh-bridge-dsh-command' (or add `dsh' to PATH), then run `M-x dsh-bridge-install-plugin'"))
-	 ((not (executable-find "pnpm"))
-	  (message "dsh bridge: `pnpm' is not on PATH — install the plugin from a terminal with `dsh plugin --profile %s add file:%s'"
-			   dsh-bridge-profile dir))
-	 ((y-or-n-p (concat diagnosis "  " question
-						(if (equal (car cmd) "npx")
-							"	 (Via npx; the first run may download the CLI.)"
-						  "")))
-	  (dsh-bridge--install-plugin-async dir))
-	 (t
-	  (message "dsh bridge: not installing; run `M-x dsh-bridge-install-plugin' when ready")))))
-
-;; Version staleness: the probe says the plugin runs; is it current?
-
-(defun dsh-bridge--bundled-plugin-version ()
-  "Version of the bundled plugin payload, or nil when no comparison is possible.
-Reads the payload's package.json.  The package tar stamps this from the
-Version header of dsh-bridge.el; a source checkout's \"0.0.0\" placeholder
-is unstamped, and source checkouts move in lockstep with their plugin
-anyway, so nil skips the check."
-  (let* ((dir (dsh-bridge--plugin-directory))
-		 (file (and dir (expand-file-name "package.json" dir))))
-	(and file
-		 (file-readable-p file)
-		 (let* ((data (with-temp-buffer
-						(insert-file-contents file)
-						(condition-case nil
-							(json-parse-string (buffer-string)
-											   :object-type 'alist)
-						  (error nil))))
-				(version (and data (alist-get 'version data))))
-		   (and (stringp version) (not (string= version "0.0.0")) version)))))
-
-(defun dsh-bridge--running-plugin-version ()
-  "The running plugin's version per GET /dsh-bridge/status, or nil when unknown.
-A non-200 (e.g. 404 from a copy that predates the route) yields nil, which
-the caller reads as staleness evidence, not as silence."
-  ;; `let*' so the request settings are in scope when `buf' is computed (see
-  ;; `dsh-bridge--plugin-state-probe').
-  (let* ((url-request-method "GET")
-		(url-request-data nil)
-		(url-request-extra-headers nil)
-		(buf (condition-case nil
-				 (url-retrieve-synchronously
-				  (concat dsh-bridge-url "/status") t nil dsh-bridge-timeout)
-			   (error nil))))
-	(when buf
-	  (let* ((status (with-current-buffer buf
-					   (and (boundp 'url-http-response-status)
-							url-http-response-status)))
-			 (body (dsh-bridge--response-body buf))
-			 (alist (and (eq status 200)
-						 (condition-case nil
-							 (json-parse-string body :object-type 'alist)
-						   (error nil)))))
-		(kill-buffer buf)
-		(and alist (alist-get 'version alist))))))
-
-(defun dsh-bridge--maybe-check-plugin-version ()
-  "Once per session, compare the running plugin's version with the bundled one.
-On a mismatch (or a running copy too old to have the status route), message
-a reinstall-and-restart pointer.  Message-only, never a prompt; the plugin
-is running, so requests proceed regardless."
-  (unless dsh-bridge--plugin-version-checked
-	(let ((bundled (dsh-bridge--bundled-plugin-version)))
-	  ;; Latch after the computation: an error in the bundled-version read
-	  ;; (e.g. a source layout not yet built) must not permanently suppress
-	  ;; the comparison.
-	  (setq dsh-bridge--plugin-version-checked t)
-	  (when bundled
-		(let ((running (dsh-bridge--running-plugin-version)))
-		  (unless (equal running bundled)
-			(message "dsh bridge: the running plugin is %s but this package bundles version %s; run `M-x dsh-bridge-install-plugin' and restart `dsh web'"
-					 (if running (format "version %s" running)
-					   "too old to report its version")
-					 bundled)))))))
+DIAGNOSIS is a sentence stating what is wrong; QUESTION is the y-or-n
+question to ask.  Fall back to a message if no DSH is available."
+  (let ((cmd (dsh-bridge--dsh-command)))
+	(if (and (y-or-n-p (concat diagnosis "\n" question))
+			 ;; Extra confirmation if using npx
+			 (or (not (equal (car cmd) "npx"))
+				 (y-or-n-p "Running dsh via npx; this may involve a download, okay?")))
+		(let ((dir (dsh-bridge--plugin-directory)))
+		  (cond
+		   ((null dir)
+			(error "dsh bridge: no bundled plugin found"))
+		   ((null cmd)
+			(error "dsh bridge: no DSH command found; set `dsh-bridge-dsh-command'."))
+		   ((not (executable-find "pnpm"))
+			(error "dsh bridge: `pnpm' not found; try installing the plugin manually"))
+		   (t
+			(dsh-bridge--install-plugin-async dir))))
+	  (message "dsh bridge: plugin install aborted"))))
 
 (defun dsh-bridge--ensure-plugin ()
-  "Diagnose bridge-plugin availability before a request, offering install.
-Called at the top of every bridge request.	The diagnosis runs once per
-session (latched): later commands just proceed and surface the ordinary
-request error.	When the plugin is missing, offer to install it
-asynchronously, with a `--dump-config' validation before suggesting a
-restart.  When the plugin is running, its version is compared against the
-bundled payload once per session."
-  (let ((state (or dsh-bridge--plugin-state ; use cache, or probe explicitly
-				   (setq dsh-bridge--plugin-state
-						 (dsh-bridge--plugin-state-probe)))))
+  "Check for DSH bridge plugin availability, and maybe offer to install.
+This function is called at the top of every bridge request.  The plugin
+diagnosis runs only once per session; later commands proceed and surface
+an ordinary request error if the bridge is unavailable or incompatible."
+  (let ((state (or dsh-bridge--bridge-status-cache ; use cache, or do a probe
+				   (setq dsh-bridge--bridge-status-cache
+						 (dsh-bridge--bridge-status)))))
 	(cond
-	 ((eq state 'running)
-	  (dsh-bridge--maybe-check-plugin-version))
+	 ((eq state 'running))
 	 (dsh-bridge--plugin-diagnosed nil)
 	 (t
-	  (setq dsh-bridge--plugin-diagnosed t)
-	  (let ((installed (dsh-bridge--plugin-installed-p)))
-		(cond
-		 ((eq state 'forbidden)
-		  (message "dsh bridge: the token route refused the probe; check `dsh-bridge-url'"))
-		 ((eq state 'unreachable)
-		  (if installed
-			  (message "dsh bridge: `dsh web' is not running at %s (the plugin is installed)"
-					   dsh-bridge-url)
+	  (setq dsh-bridge--plugin-diagnosed t) ; bug user only once
+	  (cond
+	   ;; Plugin version mismatch (maybe DSH was not restarted after an upgrade).
+	   ((eq state 'incompatible)
+		(dsh-bridge--offer-plugin-install
+		 "DSH plugin version mismatch."
+		 "Reinstall plugin? (If you already reinstalled, try restarting `dsh web'.)"))
+	   ((eq state 'forbidden)
+		(message "dsh bridge: status route refused the probe; check `dsh-bridge-url'"))
+	   (t
+		(let ((profile-state (dsh-bridge--plugin-install-state)))
+		  (cond
+		   ;; Plugin installed but DSH unavailable.
+		   ((eq profile-state 'installed)
+			(if (eq state 'unreachable)
+				(message "dsh bridge: DSH not running at %s (plugin is installed)"
+						 dsh-bridge-url)
+			  (message "dsh bridge: DSH plugin installed but not loaded; restart `dsh web'")))
+		   ;; No plugin in the profile.  Offer an install only if
+		   ;; there is evidence that DSH exists; otherwise the npx
+		   ;; fallback would download DSH, which is beyond our remit.
+		   ((or (eq profile-state 'not-installed) (dsh-bridge--dsh-installed-p))
 			(dsh-bridge--offer-plugin-install
-			 "`dsh web' is not running, and the bridge plugin is not installed."
-			 "Install it now so it loads when you next start `dsh web'?")))
-		 ((not installed)
-		  (dsh-bridge--offer-plugin-install
-		   "`dsh web' is running but the bridge plugin is not installed."
-		   (format "Install it into the `%s' profile now?"
-				   dsh-bridge-profile)))
-		 (t
-		  (message "dsh bridge: the plugin is installed but not loaded; restart `dsh web'"))))))))
+			 (format "No DSH bridge plugin installed in profile %s." dsh-bridge-profile)
+			 "Install it now?"))
+		   (t
+			(message "dsh bridge: no DSH installation found"))))))))))
 
 ;; Install and uninstall.
 
 (defun dsh-bridge--install-plugin (dir)
   "Install the bundled plugin at DIR into `dsh-bridge-profile'.
-Runs synchronously; returns non-nil on success (the *dsh-bridge-install*
-buffer holds the command output either way).  Requires a `dsh' CLI (see
-`dsh-bridge--dsh-command') and `pnpm' on PATH."
+This runs synchronously and returns non-nil on success.  It requires
+`dsh' installed (see `dsh-bridge--dsh-command'), and `pnpm' on PATH."
   (let ((cmd (dsh-bridge--dsh-command)))
 	(and cmd (executable-find "pnpm")
 		 (let ((buffer (get-buffer-create "*dsh-bridge-install*")))
@@ -624,8 +569,8 @@ COMPOSED is whether the profile composition validated (`--dump-config')."
 
 (defun dsh-bridge--plugin-install-finished ()
   "Post-install handling for the synchronous path: re-arm, validate, report."
-  (setq dsh-bridge--plugin-state nil)
-  (dsh-bridge--plugin-diagnosed-reset)
+  (setq dsh-bridge--bridge-status-cache nil
+		dsh-bridge--plugin-diagnosed nil)
   (dsh-bridge--report-install-result (dsh-bridge--validate-plugin-install)))
 
 (defun dsh-bridge--validate-sentinel (process event)
@@ -655,8 +600,8 @@ rather than blocking Emacs in the install sentinel."
   (when (string-prefix-p "finished" event)
 	(if (not (zerop (process-exit-status process)))
 		(message "dsh bridge: plugin install failed; see the *dsh-bridge-install* buffer")
-	  (setq dsh-bridge--plugin-state nil)
-	  (dsh-bridge--plugin-diagnosed-reset)
+	  (setq dsh-bridge--bridge-status-cache nil
+			dsh-bridge--plugin-diagnosed nil)
 	  (dsh-bridge--validate-plugin-install-async))))
 
 (defun dsh-bridge--install-plugin-async (dir)
@@ -710,7 +655,7 @@ Cordis id `dsh-bridge'.	 The profile manifest is checked first, so running
 this when nothing is installed is safe (pnpm's `remove' of an absent package
 exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
   (interactive)
-  (if (not (dsh-bridge--plugin-installed-p))
+  (if (not (eq (dsh-bridge--plugin-install-state) 'installed))
 	  (message "dsh bridge: the plugin is not installed in the `%s' profile"
 			   dsh-bridge-profile)
 	(unless (dsh-bridge--dsh-command)
@@ -724,8 +669,8 @@ exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
 								(list "plugin" "--profile" dsh-bridge-profile
 									  "remove" "dsh-emacs-bridge"))))
 		  (progn
-			(setq dsh-bridge--plugin-state nil)
-			(dsh-bridge--plugin-diagnosed-reset)
+			(setq dsh-bridge--bridge-status-cache nil
+				  dsh-bridge--plugin-diagnosed nil)
 			(message "Removed dsh-emacs-bridge from the `%s' profile; restart \"dsh %s\" to unload it"
 					 dsh-bridge-profile dsh-bridge-profile))
 		(display-buffer buffer)
@@ -739,13 +684,16 @@ exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
 (defun dsh-bridge--maybe-first-load-notice ()
   "Echo a one-time pointer to `dsh-bridge-install-plugin' on load.
 Runs when this file is loaded: if the profile manifest lacks the plugin and
-a `dsh' CLI is available (see `dsh-bridge--dsh-command'), a single message
-points at the install command.	The manifest read (cheap) runs before the
-CLI auto-detection (which can spawn npm), so an installed plugin costs no
-subprocess at load."
+there is evidence DSH exists — a profile directory, or a real CLI (the npx
+fallback does not count; it means only that npm is installed) — a single
+message points at the install command.  The profile check (cheap) runs
+before the CLI detection (which can spawn npm), so an installed plugin
+costs no subprocess at load."
   (when (and (not dsh-bridge--first-load-notice-done)
-			 (not (dsh-bridge--plugin-installed-p))
-			 (dsh-bridge--dsh-command))
+			 (let ((state (dsh-bridge--plugin-install-state)))
+			   (and (not (eq state 'installed))
+					(or (eq state 'not-installed)
+						(dsh-bridge--dsh-installed-p)))))
 	(setq dsh-bridge--first-load-notice-done t)
 	(message "dsh bridge: the bridge plugin is not installed in the `%s' profile — run `M-x dsh-bridge-install-plugin' to install it"
 			 dsh-bridge-profile)))

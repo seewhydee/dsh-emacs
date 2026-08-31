@@ -9,7 +9,10 @@
 # The package version's single source of truth is the Version header of
 # emacs/dsh-bridge.el.  It is stamped into the staged plugin manifest so
 # the installed payload identifies itself and version bumps force pnpm to
-# refresh the copied plugin on re-install.
+# refresh the copied plugin on re-install.  Two other copies must agree —
+# the `dsh-bridge-version' defconst (the runtime staleness comparison) and
+# the source plugin manifest (what a source-checkout install reports) —
+# and the tar recipe refuses to build when either drifts.
 
 VERSION := $(shell sed -n 's/^;; Version: //p' emacs/dsh-bridge.el | head -1)
 
@@ -40,6 +43,10 @@ dsh-plugin/lib/index.js dsh-plugin/lib/client.js: $(PLUGIN_SRC) dsh-plugin/tsdow
 package: $(TAR)
 
 $(TAR): build emacs/dsh-bridge.el dsh-plugin/package.json dsh-plugin/cordis.patch.yml
+	@grep -q '(defconst dsh-bridge-version "$(VERSION)"' emacs/dsh-bridge.el || \
+	  { echo "error: dsh-bridge-version defconst disagrees with the Version header ($(VERSION))"; exit 1; }
+	@grep -q '"version": "$(VERSION)"' dsh-plugin/package.json || \
+	  { echo "error: dsh-plugin/package.json version disagrees with the Version header ($(VERSION))"; exit 1; }
 	rm -rf .package
 	mkdir -p $(STAGE)/dsh-plugin/lib
 	cp emacs/dsh-bridge.el $(STAGE)/
