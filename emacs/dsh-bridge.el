@@ -307,16 +307,6 @@ The choice of string contents is based on `dsh-bridge--status-state'."
 ;; entry-points and detects the presence or absence of DSH and/or the
 ;; necessary DSH plugin, including offering to install the plugin.
 
-(defcustom dsh-bridge-install-plugin-offer 'ask
-  "When to offer to install the bridge plugin after a failed first use.
-- `ask' (the default) prompts once per Emacs session when a bridge
-  command finds the plugin missing; saying yes runs
-  `dsh-bridge-install-plugin'.
-- nil never offers."
-  :type '(choice (const :tag "Ask once per session" ask)
-				 (const :tag "Never offer" nil))
-  :group 'dsh-bridge)
-
 (defcustom dsh-bridge-dsh-command nil
   "How the `dsh' process is invoked.
 This variable is used only when installing (or uninstalling) the DSH
@@ -481,32 +471,29 @@ evidence the state changed; a 404 while the cache already says
   (setq dsh-bridge--plugin-version-checked nil))
 
 (defun dsh-bridge--offer-plugin-install (diagnosis question)
-  "Offer to install the bridge plugin, per `dsh-bridge-install-plugin-offer'.
+  "Offer to install the bridge plugin.
 DIAGNOSIS is a sentence stating what is wrong (also used for the plain
 report when the offer is disabled); QUESTION is the y-or-n question to ask.
 Falls back to a message naming the manual command when no `dsh' CLI /
 `pnpm' is available.  When the resolved CLI is the npx fallback, the
 question discloses that its first run may download the CLI."
-  (if (not (eq dsh-bridge-install-plugin-offer 'ask))
-	  (message "dsh bridge: %s	Run `M-x dsh-bridge-install-plugin' to install it"
-			   diagnosis)
-	(let ((dir (dsh-bridge--plugin-directory))
-		  (cmd (dsh-bridge--dsh-command)))
-	  (cond
-	   ((null dir)
-		(message "dsh bridge: no bundled plugin found; install from the source tree (see the README)"))
-	   ((null cmd)
-		(message "dsh bridge: no `dsh' CLI found — set `dsh-bridge-dsh-command' (or add `dsh' to PATH), then run `M-x dsh-bridge-install-plugin'"))
-	   ((not (executable-find "pnpm"))
-		(message "dsh bridge: `pnpm' is not on PATH — install the plugin from a terminal with `dsh plugin --profile %s add file:%s'"
-				 dsh-bridge-profile dir))
-	   ((y-or-n-p (concat diagnosis "  " question
-						  (if (equal (car cmd) "npx")
-							  "	 (Via npx; the first run may download the CLI.)"
-							"")))
-		(dsh-bridge--install-plugin-async dir))
-	   (t
-		(message "dsh bridge: not installing; run `M-x dsh-bridge-install-plugin' when ready"))))))
+  (let ((dir (dsh-bridge--plugin-directory))
+		(cmd (dsh-bridge--dsh-command)))
+	(cond
+	 ((null dir)
+	  (message "dsh bridge: no bundled plugin found; install from the source tree (see the README)"))
+	 ((null cmd)
+	  (message "dsh bridge: no `dsh' CLI found — set `dsh-bridge-dsh-command' (or add `dsh' to PATH), then run `M-x dsh-bridge-install-plugin'"))
+	 ((not (executable-find "pnpm"))
+	  (message "dsh bridge: `pnpm' is not on PATH — install the plugin from a terminal with `dsh plugin --profile %s add file:%s'"
+			   dsh-bridge-profile dir))
+	 ((y-or-n-p (concat diagnosis "  " question
+						(if (equal (car cmd) "npx")
+							"	 (Via npx; the first run may download the CLI.)"
+						  "")))
+	  (dsh-bridge--install-plugin-async dir))
+	 (t
+	  (message "dsh bridge: not installing; run `M-x dsh-bridge-install-plugin' when ready")))))
 
 ;; Version staleness: the probe says the plugin runs; is it current?
 
@@ -575,8 +562,7 @@ is running, so requests proceed regardless."
   "Diagnose bridge-plugin availability before a request, offering install.
 Called at the top of every bridge request.	The diagnosis runs once per
 session (latched): later commands just proceed and surface the ordinary
-request error.	When the plugin is missing and
-`dsh-bridge-install-plugin-offer' is `ask', offers to install it
+request error.	When the plugin is missing, offer to install it
 asynchronously, with a `--dump-config' validation before suggesting a
 restart.  When the plugin is running, its version is compared against the
 bundled payload once per session."

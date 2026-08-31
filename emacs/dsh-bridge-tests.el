@@ -1610,22 +1610,6 @@ idle live sessions, `?' for saved (cold) sessions and for unknown ids."
       (dsh-bridge--ensure-plugin))
     (should (equal installed "/tmp/plugin"))))
 
-(ert-deftest dsh-bridge-ensure-plugin-offer-disabled ()
-  "With the offer disabled, a missing plugin is reported, not offered."
-  (let ((dsh-bridge--plugin-diagnosed nil)
-        (dsh-bridge-install-plugin-offer nil)
-        (offered nil) (msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--plugin-state-probe)
-               (lambda () 'not-running))
-              ((symbol-function 'dsh-bridge--plugin-installed-p) (lambda () nil))
-              ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (setq offered t) nil))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge--ensure-plugin))
-    (should-not offered)
-    (should (string-match-p "dsh-bridge-install-plugin" msg))))
-
 (ert-deftest dsh-bridge-ensure-plugin-installed-not-loaded ()
   "Not-running + installed says to restart, with no offer."
   (let ((dsh-bridge--plugin-diagnosed nil) (msg nil))
