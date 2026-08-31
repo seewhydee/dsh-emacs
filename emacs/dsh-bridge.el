@@ -357,18 +357,15 @@ directory, and (iii) `npx --yes @deepseek-ai/dsh'."
 		((dsh-bridge--detect-npm-launcher))
 		((executable-find "npx") '("npx" "--yes" "@deepseek-ai/dsh"))))
 
-(defun dsh-bridge--profile-manifest ()
-  "Path of the profile's package.json manifest."
-  (expand-file-name (format "profiles/%s/package.json" dsh-bridge-profile)
-					(dsh-bridge--dsh-home)))
-
 (defun dsh-bridge--plugin-installed-p ()
   "Whether the bridge plugin is installed in the DSH profile.
 Reads the profile manifest (`$DSH_HOME/profiles/<profile>/package.json'):
 the plugin counts as installed when it appears in `dependencies' or in
 `dsh.profile.bundles'.	Returns nil when the manifest is missing or
 unreadable (also the \"profile never initialized\" case)."
-  (let ((manifest (dsh-bridge--profile-manifest)))
+  (let ((manifest (expand-file-name ; get profile's package.json manifest
+				   (format "profiles/%s/package.json" dsh-bridge-profile)
+				   (dsh-bridge--dsh-home))))
 	(when (file-readable-p manifest)
 	  (let ((data (with-temp-buffer
 					(insert-file-contents manifest)
