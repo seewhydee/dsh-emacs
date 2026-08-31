@@ -64,8 +64,8 @@ From this repository's root directory:
 make build   # emits dsh-plugin/lib/index.js (host) + lib/client.js (browser)
 ```
 
-If you have `dsh` installed on
-the executable path, run the following commands
+If you have `dsh` installed on the executable path, run the following
+commands:
 
 ```sh
 # global install, from this repo root:
@@ -188,18 +188,11 @@ The following commands are available from the DSH-Prompt buffer:
 * `C-c C-c` — send the region, or the whole buffer, as a prompt.  On
   success, bury the buffer.
 * `C-c C-d` — push it to the DSH composer as a draft instead.
-* `C-c C-m` — select the session's model (and reasoning effort) from the
-  host's catalog, via `completing-read`.
+* `C-c C-m` — set the model and reasoning effort.
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
 * `M-p` / `M-n` — walk the session's prompt history.
-
-The header line shows the session's status glyph, the target session
-label, the current model's display name, the context-window occupancy as a
-percentage (matching the web UI's meter), and a `✓ sent HH:MM` marker after
-a send.  The model and occupancy segments stay empty until their first
-successful fetch.
 
 When `markdown-mode` is installed, this buffer derives from it, so
 most markdown editing commands are also available.
@@ -207,16 +200,9 @@ most markdown editing commands are also available.
 ### Sending text from DSH to Emacs
 
 The DSH plugin adds a "Send to Emacs" button that lets you push
-specific assistant messages to Emacs.
-
-Emacs subscribes to the bridge's event stream automatically on first
-bridge use, and that stream feeds the live session status, the
-sessions-list auto-refresh, and the DSH-View buffer's push from the
-"Send to Emacs" button.  You can use `i` in the DSH-View buffer (or run
-`M-x dsh-bridge-receive`) to pull the latest pushed message yourself, or
-run `M-x dsh-bridge-notifications-stop` to pause the stream for the
-session (latched until `M-x dsh-bridge-notifications-start`).  Receiving
-selects the DSH-View buffer unless `dsh-bridge-receive-pop` is nil.
+specific assistant messages to Emacs.  This automatically pops to the
+DSH-View buffer in Emacs.  You can use `i` in the DSH-View buffer (or
+run `M-x dsh-bridge-receive`) to pull the last message pushed.
 
 ## Permissions, authentication, and failure bounds
 

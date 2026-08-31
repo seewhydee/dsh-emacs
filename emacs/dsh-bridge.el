@@ -334,17 +334,28 @@ The choice of string contents is based on `dsh-bridge--status-state'."
               (_        'dsh-bridge-status-unknown-face))))
       (propertize char 'face face))))
 
-;;; Plugin management
+;;; DSH executable and plugin management
 
-;; The DSH bridge plugin cannot be hot-swapped, and a harness process
-;; restart is required for it to take effect.  When dsh-emacs-bridge
-;; is installed as an Emacs package, the user is expected to
-;; explicitly run `dsh-bridge-install-plugin' to install the DSH
-;; plugin (Emacs packaging offers no install/uninstall hooks, and we
-;; opt not to abuse autoload magic).  However, we implement the helper
-;; function `dsh-bridge--ensure-plugin', which is called on common
-;; entry-points and detects the presence or absence of DSH and/or the
-;; necessary DSH plugin, including offering to install the plugin.
+;; This library requires (i) a working DSH installation, and (ii) an
+;; installed DSH plugin, which manages the loopback interface for the
+;; data bridge between Emacs and DSH.
+
+;; In accessing the DSH installation, we have a bit of code gnarliness
+;; as we try to accommodate the several different ways `dsh' can be
+;; invoked: (i) dsh directly installed on PATH, (ii) run via npm, and
+;; (iii) run via pnpm (e.g. if running directly From a repo checkout).
+
+;; When dsh-emacs-bridge is installed as an Emacs package, the user is
+;; expected to run \\`M-x dsh-bridge-install-plugin' to install the
+;; DSH plugin (Emacs packaging has no install/uninstall hooks, and we
+;; opt not to abuse autoload magic).  This installs the plugin as a
+;; *file copy*; \\`M-x dsh-bridge-uninstall-plugin' uninstalls it.
+;; However, the DSH plugin cannot be hot-swapped; we rely on the
+;; user's manual intervention to restart DSH for the plugin to load.
+
+;; To help guide the user, `dsh-bridge--ensure-plugin' is called on
+;; common entry-points, and auto-detects the DSH installation and/or
+;; the DSH plugin.  If the plugin is missing, it offers to install it.
 
 (defun dsh-bridge--detect-npm-launcher ()
   "Helper function to auto-detect an npm command to launch `dsh'."
@@ -714,6 +725,18 @@ restart \"dsh %s\" to complete unload"
 
 ;;; Push notifications
 
+;; The DSH plugin implements a push channel, which updates Emacs on
+;; happenings in the harness (turn lifecycle, per-session context
+;; usage, session-inventory changes, the composer-draft push, and the
+;; "Send to Emacs" outbox notice).
+
+;; Emacs subscribes to this via a long-lived loopback connection to
+;; `GET /dsh-bridge/events'.  As this is an in-principle infinite
+;; stream, we operate it raw (with low-level code to handle HTTP/1.1,
+;; chunking, etc.), rather than using `url-retrieve' or `url-http'
+;; helpers.  Only the notification stream is handled like this; other
+;; parts of the bridge use `url-http'.
+
 (defvar dsh-bridge--notifications-enabled nil
   "Whether the DSH notification listener is currently enabled.")
 
@@ -960,6 +983,8 @@ auto-refresh, and the \"Send to Emacs\" push all ride it); only an explicit
   (when (and (not dsh-bridge--notifications-paused)
 			 (not dsh-bridge--notifications-enabled))
 	(dsh-bridge-notifications-start)))
+
+;;; Bridge requests
 
 (defun dsh-bridge--extra-headers (payload)
   "Return the HTTP header alist for a request with PAYLOAD (nil for no body).
