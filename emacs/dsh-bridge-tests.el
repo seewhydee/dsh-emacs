@@ -1950,12 +1950,6 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
     (should (equal (car result) '(((kind . "draft")) ((kind . "outbox")))))
     (should (equal (cdr result) ""))))
 
-(ert-deftest dsh-bridge-outbox-notice-p ()
-  "Only outbox-kind events trigger a receive."
-  (should (dsh-bridge--outbox-notice-p '(((kind . "outbox")))))
-  (should-not (dsh-bridge--outbox-notice-p '(((kind . "draft")))))
-  (should-not (dsh-bridge--outbox-notice-p nil)))
-
 (ert-deftest dsh-bridge-sse-decode-roundtrip ()
   "A full chunked SSE body decodes to an outbox notice."
   (let* ((payload "data: {\"kind\":\"outbox\"}\n\n")
@@ -1966,7 +1960,7 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
     (let* ((decoded (dsh-bridge--chunked-decode raw))
            (parsed (dsh-bridge--sse-parse
                     (decode-coding-string (car decoded) 'utf-8))))
-      (should (dsh-bridge--outbox-notice-p (car parsed))))))
+      (should (equal (car parsed) '(((kind . "outbox"))))))))
 
 ;;; Turn notifications, session status, and the header line
 

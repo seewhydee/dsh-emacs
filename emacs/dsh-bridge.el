@@ -197,7 +197,7 @@ This option does not affect \\`C-c C-d' (`dsh-bridge-draft')."
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-dsh-command nil
-  "How the `dsh' process is invoked.
+  "How the DeepSeek Harness process (dsh) is invoked.
 This variable is used only when installing (or uninstalling) the DSH
 plugin.  Its value can be one of the following:
 
@@ -643,38 +643,38 @@ package.  The `file:' spec makes pnpm copy the plugin into the profile,
 so the installation survives upgrades of this Emacs package; re-run this
 command after each upgrade to refresh the installed copy.
 
-Requires a `dsh' CLI (see `dsh-bridge-dsh-command') and `pnpm' on PATH (the
-plugin manager shells out to pnpm).	 The composed profile is validated
-before telling you to restart \"dsh web\" to load the plugin."
+Restart \"dsh web\" afterwards for the plugin to load.
+
+The installation requires a working `dsh' (see `dsh-bridge-dsh-command')
+as well as `pnpm' on PATH."
   (interactive)
   (let ((dir (dsh-bridge--plugin-directory)))
 	(unless dir
-	  (user-error "No bundled dsh-emacs-bridge plugin found next to dsh-bridge.el; install from the source tree instead (see the README)"))
+	  (user-error "No bundled dsh-emacs-bridge plugin found"))
 	(unless (dsh-bridge--dsh-command)
-	  (user-error "No `dsh' CLI available; set `dsh-bridge-dsh-command' or add `dsh' to PATH"))
+	  (user-error "No `dsh' executable found; set `dsh-bridge-dsh-command'"))
 	(unless (executable-find "pnpm")
-	  (user-error "The `pnpm' executable was not found on PATH"))
+	  (user-error "No `pnpm' executable found on PATH"))
 	(if (dsh-bridge--install-plugin dir)
 		(dsh-bridge--plugin-install-finished)
 	  (display-buffer (get-buffer-create "*dsh-bridge-install*"))
-	  (user-error "dsh plugin install failed; see the *dsh-bridge-install* buffer"))))
+	  (user-error "dsh plugin install failed"))))
 
 ;;;###autoload
 (defun dsh-bridge-uninstall-plugin ()
   "Remove the bridge plugin from the DSH profile.
-Runs \"dsh plugin --profile PROFILE remove dsh-emacs-bridge\".	The removal
-target is the package name `dsh-emacs-bridge' (the npm dependency), not the
-Cordis id `dsh-bridge'.	 The profile manifest is checked first, so running
-this when nothing is installed is safe (pnpm's `remove' of an absent package
-exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
+Calls \"dsh plugin --profile PROFILE remove dsh-emacs-bridge\", where
+PROFILE is `dsh-bridge-profile'.  Running this is safe even if the
+plugin is not installed.
+
+Restart \"dsh web\" afterwards for the plugin to unload."
   (interactive)
   (if (not (eq (dsh-bridge--plugin-install-state) 'installed))
-	  (message "dsh bridge: the plugin is not installed in the `%s' profile"
-			   dsh-bridge-profile)
+	  (message "dsh bridge: no existing plugin installed")
 	(unless (dsh-bridge--dsh-command)
-	  (user-error "No `dsh' CLI available; set `dsh-bridge-dsh-command' or add `dsh' to PATH"))
+	  (user-error "No `dsh' executable found; set `dsh-bridge-dsh-command'"))
 	(unless (executable-find "pnpm")
-	  (user-error "The `pnpm' executable was not found on PATH"))
+	  (user-error "No `pnpm' executable found on PATH"))
 	(let ((cmd (dsh-bridge--dsh-command))
 		  (buffer (get-buffer-create "*dsh-bridge-install*")))
 	  (if (zerop (apply #'call-process (car cmd) nil buffer nil
@@ -684,16 +684,16 @@ exits 1).  Restart \"dsh web\" afterwards for the plugin to unload."
 		  (progn
 			(setq dsh-bridge--bridge-status-cache nil
 				  dsh-bridge--plugin-diagnosed nil)
-			(message "Removed dsh-emacs-bridge from the `%s' profile; restart \"dsh %s\" to unload it"
-					 dsh-bridge-profile dsh-bridge-profile))
+			(message "DSH plugin `dsh-emacs-bridge' removed; \
+restart \"dsh %s\" to complete unload"
+					 dsh-bridge-profile))
 		(display-buffer buffer)
-		(user-error "dsh plugin remove failed; see the *dsh-bridge-install* buffer")))))
+		(user-error "dsh plugin remove failed")))))
 
 ;;; Low-level HTTP plumbing
 
 (defun dsh-bridge--response-body (buffer)
-  "Return the HTTP response body of BUFFER.
-The url-http response buffer is unibyte, so decode the body as UTF-8."
+  "Return the HTTP response body of BUFFER."
   (with-current-buffer buffer
 	(goto-char (point-min))
 	(if (re-search-forward "\r?\n\r?\n" nil t)
@@ -712,25 +712,25 @@ The url-http response buffer is unibyte, so decode the body as UTF-8."
 	;; the authorization header, so watch out.
 	(and token (string-to-unibyte token))))
 
-;;; Push notifications (loopback SSE listener: status, sessions-changed, Send-to-Emacs)
+;;; Push notifications
 
 (defvar dsh-bridge--notifications-enabled nil
-  "Whether the notification listener is currently being kept connected.")
+  "Whether the DSH notification listener is currently enabled.")
 
 (defvar dsh-bridge--notifications-paused nil
-  "Whether the user has explicitly paused the notification listener.
+  "Whether the user has explicitly paused the DSH notification listener.
 `dsh-bridge-notifications-stop' latches this so the listener stays off until
 `dsh-bridge-notifications-start' is called again; the bridge itself never
 un-pauses it.")
 
 (defvar dsh-bridge--notifications-process nil
-  "The live SSE notification process, or nil.")
+  "The DSH bridge's live SSE notification process, or nil.")
 
 (defvar dsh-bridge--notifications-timer nil
-  "Reconnect timer for the notification listener, or nil.")
+  "Reconnect timer for the DSH notification listener, or nil.")
 
 (defvar dsh-bridge--notifications-raw ""
-  "Raw, not-yet-decoded bytes from the notification process (unibyte).")
+  "Raw bytes from the DSH notification process.")
 
 (defvar dsh-bridge--notifications-headers-done nil
   "Non-nil once the HTTP response headers have been consumed.")
@@ -784,10 +784,6 @@ text with no complete event terminator."
 						  (error nil))))
 			  (when json (push json events)))))))
 	(cons (nreverse events) rest)))
-
-(defun dsh-bridge--outbox-notice-p (events)
-  "Whether EVENTS (decoded SSE events) contain an outbox notice."
-  (seq-some (lambda (e) (equal (alist-get 'kind e) "outbox")) events))
 
 (defun dsh-bridge--notification-handle-events (events)
   "Dispatch decoded SSE EVENTS for the bridge's own concerns.
@@ -874,7 +870,9 @@ burst of frames (a rename or archive storms several events) into one refresh."
 			;; matching buffers/list row.  Runs for any event batch, before the
 			;; outbox handling below.
 			(dsh-bridge--notification-handle-events events)
-			(when (and (dsh-bridge--outbox-notice-p events)
+			(when (and (seq-some
+						(lambda (e) (equal (alist-get 'kind e) "outbox"))
+						events)
 					   (not dsh-bridge--notifications-receive-pending))
 			  (setq dsh-bridge--notifications-receive-pending t)
 			  ;; Defer: `dsh-bridge-receive' does a synchronous pull that must
