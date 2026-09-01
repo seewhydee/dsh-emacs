@@ -177,10 +177,17 @@ round-trip."
             (dsh-bridge--last-resolved-active '("s1" . nil)))
         (should (equal (dsh-bridge--dispatcher-header)
                        "T (last active)"))))
-    ;; Nothing bound and nothing resolved: no qualifier.
+    ;; Nothing bound and nothing resolved: the cache's last-active live
+    ;; session is named, with the (last active) qualifier.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active nil))
+        (should (equal (dsh-bridge--dispatcher-header) "T (last active)"))))
+    ;; Nothing bound, resolved, or live: empty header.
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session nil)
+            (dsh-bridge--last-resolved-active nil)
+            (dsh-bridge--sessions-cache nil))
         (should (equal (dsh-bridge--dispatcher-header) ""))))))
 
 (ert-deftest dsh-bridge-session-unknown-message ()

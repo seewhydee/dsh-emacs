@@ -1199,26 +1199,24 @@ qualifier indicates if the DSH session is the user-specified default, or
 the last-active session (as a fallback)."
   (let* ((buffer (or (bound-and-true-p transient--original-buffer)
 					 (current-buffer)))
-		 (session (dsh-bridge--effective-session buffer))
-		 (status (dsh-bridge--status-glyph session))
-		 (id (dsh-bridge--buffer-session buffer))
-		 (label
-		  (cond
-		   ;; Bound buffer session: plain label.
-		   (id (dsh-bridge--session-label id))
-		   ;; Default target: (default) qualifier.
-		   (dsh-bridge-default-session
-			(concat (dsh-bridge--session-label dsh-bridge-default-session)
-					" (default)"))
-		   ;; Resolved last-active: (last active) qualifier.
-		   (dsh-bridge--last-resolved-active
-			(concat (or (cdr dsh-bridge--last-resolved-active)
-						(dsh-bridge--session-label
-						 (or (car-safe dsh-bridge--last-resolved-active)
-							 (dsh-bridge--cache-last-active))))
-					" (last active)"))
-		   (t ""))))
-	(concat (if (string-empty-p status) label (concat status " " label)))))
+		 id label)
+	(cond
+	 ((setq id (dsh-bridge--effective-session buffer))
+	  (setq label (dsh-bridge--session-label id))
+	  ;; If targeting the default session, add a (default) qualifier.
+	  (when (equal id dsh-bridge-default-session)
+		(setq label (concat label " (default)"))))
+	 ;; Try host-resolved last-active session.
+	 ((setq id (car-safe dsh-bridge--last-resolved-active))
+	  (setq label (concat (or (cdr dsh-bridge--last-resolved-active)
+							  (dsh-bridge--session-label id))
+						  " (last active)")))
+	 ;; Otherwise, try the most recently active session.
+	 ((setq id (dsh-bridge--cache-last-active))
+	  (setq label (concat (dsh-bridge--session-label id) " (last active)"))))
+	(unless label (setq label ""))
+	(let ((status (or (and id (dsh-bridge--status-glyph id)) "")))
+	  (concat (if (string-empty-p status) label (concat status " " label))))))
 
 (defun dsh-bridge--session-choice (session)
   "The completing-read candidate string for SESSION: title, else raw id.
