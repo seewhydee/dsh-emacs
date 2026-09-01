@@ -1102,18 +1102,16 @@ See `dsh-bridge--sessions-cache' for the session data format."
   (seq-find (lambda (s) (equal (alist-get 'id s) id))
 			dsh-bridge--sessions-cache))
 
-(defun dsh-bridge--session-cwd (id)
-  "Return the cached working directory for session ID, or nil."
-  (let ((session (dsh-bridge--session-for-id id)))
-	(and session (alist-get 'cwd session))))
-
 (defun dsh-bridge--apply-session-directory (session-id cwd &optional buffer)
   "Set BUFFER's `default-directory' to SESSION-ID's workspace.
 CWD, when non-nil, overrides the sessions-cache lookup for SESSION-ID.	Leaves
 the directory alone when no cwd is known or BUFFER is not live.	 BUFFER is a
 buffer name or buffer, defaulting to the current buffer."
   (let* ((buf (or buffer (current-buffer)))
-		 (dir (or cwd (and session-id (dsh-bridge--session-cwd session-id)))))
+		 (dir cwd))
+	;; If CWD is not supplied, try filling it from session data.
+	(and (null dir) session-id
+		 (setq dir (alist-get 'cwd (dsh-bridge--session-for-id session-id))))
 	(when (and dir (buffer-live-p (get-buffer buf)))
 	  (with-current-buffer buf
 		(setq default-directory (file-name-as-directory dir))))))
