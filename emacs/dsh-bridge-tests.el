@@ -709,12 +709,12 @@ inheriting markdown's keymap."
   "`dsh-bridge-reply' in the output buffer binds the prompt to the shown
 session and never touches the default target."
   (let ((dsh-bridge-default-session "target")
+        (dsh-bridge--sessions-cache '(((id . "shown") (live . t))))
         (bound nil) (popped nil))
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "shown")
-      (cl-letf (((symbol-function 'dsh-bridge--session-live-p) (lambda (_) t))
-                ((symbol-function 'dsh-bridge--set-prompt-session)
+      (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
                  (lambda (id) (setq bound id)))
                 ((symbol-function 'dsh-bridge--prompt-buffer)
                  (lambda () (get-buffer-create "*dsh-bridge-prompt*")))

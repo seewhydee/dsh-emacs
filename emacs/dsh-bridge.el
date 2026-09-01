@@ -1102,10 +1102,6 @@ See `dsh-bridge--sessions-cache' for the session data format."
   (seq-find (lambda (s) (equal (alist-get 'id s) id))
 			dsh-bridge--sessions-cache))
 
-(defun dsh-bridge--session-live-p (id)
-  "Whether the cached session ID is live (has a running agent)."
-  (alist-get 'live (dsh-bridge--session-for-id id)))
-
 (defun dsh-bridge--session-cwd (id)
   "Return the cached working directory for session ID, or nil."
   (let ((session (dsh-bridge--session-for-id id)))
@@ -2608,10 +2604,11 @@ A saved (cold) session known to the session cache is resumed via
 `dsh-bridge--resume-session' (echoing \"resuming…\", and the host's error on
 failure); an id absent from the cache returns nil without a resume attempt,
 leaving the not-known report to the caller."
-  (cond
-   ((dsh-bridge--session-live-p id) t)
-   ((dsh-bridge--session-for-id id) (and (dsh-bridge--resume-session id) t))
-   (t nil)))
+  (let ((session (dsh-bridge--session-for-id id)))
+	(cond
+	 ((alist-get 'live session) t)
+	 (session (and (dsh-bridge--resume-session id) t))
+	 (t nil))))
 
 (defun dsh-bridge-open-session ()
   "Open the session under point: bind the prompt buffer to it and pop it up.
