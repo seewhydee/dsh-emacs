@@ -1322,9 +1322,10 @@ then uses the effective session)."
   (when current-prefix-arg
 	(dsh-bridge--read-session-id prompt)))
 
-(defun dsh-bridge--session-unknown-message (id)
-  "The message for acting on a session ID absent from the session cache."
-  (format "session %s is not known to DSH" id))
+(defun dsh-bridge--warn-if-unknown-session (id)
+  "Check if session ID is unknown, and if so emit a warning."
+  (unless (dsh-bridge--session-for-id id)
+	(message "dsh-bridge: unknown session %s" id)))
 
 (defun dsh-bridge--record-last-resolved (alist)
   "Record the session ALIST the host resolved for a nil-target request.
@@ -1345,24 +1346,24 @@ Advisory display cache only (see `dsh-bridge--last-resolved-active')."
 
 (defvar dsh-bridge--prompt-history nil
   "Alist of (SESSION-ID . PROMPTS) for the prompt buffer's history.
-PROMPTS is a list of prompt strings, newest first.	The authoritative list
-comes from the host's `GET /prompts'; entries are prepended locally after
-sends so `M-p' sees the newest prompt without a refetch.")
+PROMPTS is a list of prompt strings, newest first. The authoritative
+list is fetched from the bridge; after sending a prompt, the entry is
+prepended locally so it is available without a refetch.")
 
 (defvar dsh-bridge--last-sent nil
-  "Alist of (SESSION-ID . (TEXT . TS)) for the most recent explicit send.
-TEXT is the sent prompt; TS is the float-time it was sent.	Updated by
-`dsh-bridge--prompt-history-record-send'; drives the prompt header's
-`✓ sent HH:MM' marker and the resend guard.	 Drafts are not recorded, so the
-guard never mistakes a draft push for a resend.")
+  "Alist of (SESSION-ID . (TEXT . TS)) for the most recent prompt send.
+TEXT is the sent prompt; TS is the float-time it was sent.  This
+variable is updated by `dsh-bridge--prompt-history-record-send', and
+used by the prompt header and the resend guard.  Drafts are not
+recorded, so the guard never mistakes a draft push for a resend.")
 
 (defvar-local dsh-bridge--prompt-history-session nil
   "Session id the prompt buffer's history refers to, or nil.")
 
 (defvar-local dsh-bridge--prompt-history-index nil
   "Index into the current session's prompt list shown in the prompt buffer.
-nil means the buffer holds the draft (most recent content); 0 is the newest
-prompt.")
+A nil value means the buffer holds a draft (most recent content); 0 is
+the newest prompt.")
 
 (defvar-local dsh-bridge--prompt-draft nil
   "The unsent buffer content saved when browsing prompt history, or nil.")
@@ -2246,8 +2247,7 @@ echoing \"resuming…\"."
 					   dsh-bridge-prompt-display-action))
 	;; A failed resume already echoed the host's error; only an id the cache
 	;; does not know at all gets the not-known message.
-	(unless (dsh-bridge--session-for-id session-id)
-	  (message "dsh-bridge: %s" (dsh-bridge--session-unknown-message session-id)))))
+	(dsh-bridge--warn-if-unknown-session session-id)))
 
 (defun dsh-bridge-reply ()
   "Reply to the session whose reply is shown in `*dsh-bridge-output*'.
@@ -2627,9 +2627,7 @@ web UI's implicit-resume model.	 The default target is not changed."
 						   dsh-bridge-prompt-display-action))
 		;; A failed resume already echoed the host's error; only an id the
 		;; cache does not know at all gets the not-known message.
-		(unless (dsh-bridge--session-for-id id)
-		  (message "dsh-bridge: %s"
-				   (dsh-bridge--session-unknown-message id)))))))
+		(dsh-bridge--warn-if-unknown-session id)))))
 
 (defun dsh-bridge-set-default-target-at-point ()
   "Set the default target to the session under point.
@@ -2642,9 +2640,7 @@ A saved (cold) session is resumed first, so the target is live once bound."
 		  (dsh-bridge-set-default-target id)
 		;; A failed resume already echoed the host's error; only an id the
 		;; cache does not know at all gets the not-known message.
-		(unless (dsh-bridge--session-for-id id)
-		  (message "dsh-bridge: %s"
-				   (dsh-bridge--session-unknown-message id)))))))
+		(dsh-bridge--warn-if-unknown-session id)))))
 
 (defun dsh-bridge-peek-session ()
   "Fetch the session under point's latest reply into *dsh-bridge-output*.

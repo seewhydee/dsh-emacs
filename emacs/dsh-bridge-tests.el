@@ -199,10 +199,18 @@ present iff the indicator style produces a glyph."
             (dsh-bridge-default-session "s1"))
         (should (string-equal (dsh-bridge--dispatcher-header) "T (default)"))))))
 
-(ert-deftest dsh-bridge-session-unknown-message ()
-  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
-    (should (string-match-p "session s1 is not known"
-                            (dsh-bridge--session-unknown-message "s1")))))
+(ert-deftest dsh-bridge-warn-if-unknown-session ()
+  "An unknown session emits the warning; a known session is silent."
+  (let ((msg nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (let ((dsh-bridge--sessions-cache nil))
+        (dsh-bridge--warn-if-unknown-session "s1"))
+      (should (string-match-p "unknown session s1" msg))
+      (setq msg nil)
+      (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
+        (dsh-bridge--warn-if-unknown-session "s1"))
+      (should (null msg)))))
 
 (ert-deftest dsh-bridge-send-text-records-last-resolved ()
   "A nil-target send records the host-resolved session for display."
@@ -755,7 +763,8 @@ session and never touches the default target."
       (should (equal (cadr popped) dsh-bridge-prompt-display-action)))))
 
 (ert-deftest dsh-bridge-reply-not-live-message ()
-  "Reply to an unknown session gives the not-known message, no resume attempt."
+  "Reply to an unknown session gives the unknown-session message, no resume
+attempt."
   (let ((dsh-bridge--sessions-cache nil)
         (bound nil) (msg nil) (resumed nil))
     (with-temp-buffer
@@ -770,7 +779,7 @@ session and never touches the default target."
         (dsh-bridge-reply))
       (should (null bound))
       (should (null resumed))
-      (should (string-match-p "not known" msg)))))
+      (should (string-match-p "unknown session gone" msg)))))
 
 (ert-deftest dsh-bridge-reply-resume-failure-keeps-host-message ()
   "A failed resume's host error is not overwritten by the not-known message."
@@ -1031,7 +1040,8 @@ untouched."
     (should popped)))
 
 (ert-deftest dsh-bridge-open-session-not-live-message ()
-  "RET on an unknown id reports the not-known message, with no resume attempt."
+  "RET on an unknown id reports the unknown-session message, with no resume
+attempt."
   (let ((dsh-bridge--sessions-cache nil)
         (bound nil) (msg nil) (resumed nil))
     (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
@@ -1046,7 +1056,7 @@ untouched."
         (dsh-bridge-open-session)))
     (should (null bound))
     (should (null resumed))
-    (should (string-match-p "not known" msg))))
+    (should (string-match-p "unknown session gone" msg))))
 
 (ert-deftest dsh-bridge-open-session-resume-failure-keeps-host-message ()
   "RET on a saved row whose resume fails keeps the host's error message."
