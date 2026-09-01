@@ -426,11 +426,12 @@ export function outboxMessage(): string {
 
 /**
  * One SSE `data:` frame announcing that a session's agent started a turn.
- * Carries the session id so the Emacs status tracker can flip that session to
- * running; the browser ignores the non-`draft` kind.
+ * Carries the session id and the turn event's ms-epoch `time`, so Emacs can
+ * update the `lastActive` recency of the session's row; the browser ignores the
+ * non-`draft` kind.
  */
-export function turnStartMessage(sessionId: string): string {
-  return `data: ${JSON.stringify({ kind: 'turn-start', sessionId })}\n\n`
+export function turnStartMessage(sessionId: string, time: number): string {
+  return `data: ${JSON.stringify({ kind: 'turn-start', sessionId, time })}\n\n`
 }
 
 /**
@@ -438,10 +439,12 @@ export function turnStartMessage(sessionId: string): string {
  * turn-end reason kind (`completed` / `aborted` / `blocked` / `error` /
  * `max-tokens`; `interrupted` is only written by persistence repair, never
  * emitted live), so the Emacs `message` variant can phrase a failed turn
- * without echoing "finished". The glyph returns to idle regardless of reason.
+ * without echoing "finished". `time` is the event's ms-epoch timestamp, used
+ * to refresh the sessions-list recency; the glyph returns to idle regardless of
+ * reason.
  */
-export function turnCompleteMessage(sessionId: string, reason: string): string {
-  return `data: ${JSON.stringify({ kind: 'turn-complete', sessionId, reason })}\n\n`
+export function turnCompleteMessage(sessionId: string, reason: string, time: number): string {
+  return `data: ${JSON.stringify({ kind: 'turn-complete', sessionId, reason, time })}\n\n`
 }
 
 /**

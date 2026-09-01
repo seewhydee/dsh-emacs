@@ -1141,9 +1141,9 @@ attempt."
         (should (eq (get-text-property 0 'face (aref live-cells 0))
                     'dsh-bridge-default-target-face))
         (should (equal (aref saved-cells 0) " "))
-        ;; Status cell (index 1): the state glyph — filled circle for running
+        ;; Status cell (index 1): the state glyph — filled square for running
         ;; (amber), `?' for saved (no live agent).
-        (should (equal (aref live-cells 1) "●"))
+        (should (equal (aref live-cells 1) "■"))
         (should (equal (aref saved-cells 1) "?"))
         ;; Session name (index 2): unaltered name; cold rows have no face now.
         (should (equal (aref live-cells 2) "First live"))
@@ -1398,15 +1398,16 @@ session as default target."
                        (mapcar (lambda (c) (list (cadr c) c)) called)))))
 
 (ert-deftest dsh-bridge-status-glyph-session-states ()
-  "The status glyph reflects the session state: filled circle for running and
-idle live sessions, `?' for saved (cold) sessions and for unknown ids."
+  "The status glyph reflects the session state under the geometric indicator:
+a filled circle for an idle live session, a filled square for a running one,
+`?' for saved (cold) sessions and for unknown ids."
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache
          '(((id . "s-run") (live . t) (running . t))
            ((id . "s-idle") (live . t) (running . nil))
            ((id . "s-cold") (live . nil))))
         (dsh-bridge-status-indicator 'geometric))
-    (should (string= (dsh-bridge--status-glyph "s-run") "●"))
+    (should (string= (dsh-bridge--status-glyph "s-run") "■"))
     (should (string= (dsh-bridge--status-glyph "s-idle") "●"))
     (should (string= (dsh-bridge--status-glyph "s-cold") "?"))
     (should (string= (dsh-bridge--status-glyph "s-unknown") "?"))))
@@ -2024,7 +2025,7 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
     (dsh-bridge--status-set "s1" 'idle)
     (should (string= (dsh-bridge--status-glyph "s1") "●"))
     (dsh-bridge--status-set "s1" 'running)
-    (should (string= (dsh-bridge--status-glyph "s1") "●")))
+    (should (string= (dsh-bridge--status-glyph "s1") "■")))
   (let ((dsh-bridge--session-status nil)
         (dsh-bridge--sessions-cache nil)
         (dsh-bridge-status-indicator 'text))
@@ -2265,6 +2266,134 @@ uncached sessions alone.  `run-at-time' is stubbed to run immediately."
          ((kind . "turn-complete") (sessionId . "s1"))
          ((kind . "turn-complete") (sessionId . "s2"))))
       (should (equal refetched '(("s1" . t) ("s1" . t)))))))
+
+(ert-deftest dsh-bridge-view-replies-cache-refresh-shifts-index ()
+  "A turn-complete cache refresh keeps a cycling view's index aligned with the
+newest-first list, so the `(k/n)' counter stays honest."
+  (let ((dsh-bridge--replies-cache '(("s1" "newest" "middle" "oldest"))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload)
+                 (cons 200 (list (cons 'sessionId "s1")
+                                 (cons 'replies
+                                       (list "newest2" "newest" "middle" "oldest")))))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (setq-local dsh-bridge--view-replies-session "s1")
+        (let ((inhibit-read-only t)) (insert "middle"))
+        ;; Cycling: the shown reply is at index 1 of the 3-reply list.
+        (setq-local dsh-bridge--view-replies-index 1)
+        (dsh-bridge--view-replies-cache-refresh "s1")
+        (should (equal (cdr (assoc "s1" dsh-bridge--replies-cache))
+                       '("newest2" "newest" "middle" "oldest")))
+        ;; One new reply at the head shifts the index by +1.
+        (should (eq dsh-bridge--view-replies-index 2)))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-next-reply-from-rest-steps-to-newer ()
+  "M-n at rest refreshes the reply list and steps to a newer reply when one has
+arrived, re-anchoring the shown text."
+  (let ((dsh-bridge--replies-cache '(("s1" "newest" "older"))))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload)
+                 (cons 200 (list (cons 'sessionId "s1")
+                                 (cons 'replies
+                                       (list "brand-new" "newest" "older")))))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (setq-local dsh-bridge--view-replies-session "s1")
+        (let ((inhibit-read-only t)) (insert "newest"))
+        (setq-local dsh-bridge--view-replies-index nil)
+        (dsh-bridge--view-next-reply-from-rest)
+        (should (equal (buffer-string) "brand-new"))
+        (should (equal dsh-bridge--view-replies-anchor "newest"))
+        ;; The shown reply is the new newest: its index is 0.
+        (should (eq dsh-bridge--view-replies-index 0)))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-next-reply-from-rest-at-newest ()
+  "M-n at rest reports no newer replies when the shown text is still the newest."
+  (let ((dsh-bridge--replies-cache '(("s1" "newest" "older")))
+        (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload)
+                 (cons 200 (list (cons 'sessionId "s1")
+                                 (cons 'replies (list "newest" "older"))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (setq-local dsh-bridge--view-replies-session "s1")
+        (let ((inhibit-read-only t)) (insert "newest"))
+        (setq-local dsh-bridge--view-replies-index nil)
+        (dsh-bridge--view-next-reply-from-rest)
+        (should (equal (buffer-string) "newest"))
+        (should (null dsh-bridge--view-replies-index))
+        (should (string-match-p "no newer replies" msg)))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-view-next-reply-from-rest-not-found ()
+  "M-n at rest reports no newer replies when the shown text is not a known
+reply (e.g. a pushed message whose exact text is not in the reply list), and
+leaves the buffer and index untouched."
+  (let ((dsh-bridge--replies-cache '(("s1" "newest" "older")))
+        (msg nil))
+    (cl-letf (((symbol-function 'dsh-bridge--request)
+               (lambda (_method _path _payload)
+                 (cons 200 (list (cons 'sessionId "s1")
+                                 (cons 'replies (list "newest" "older"))))))
+              ((symbol-function 'message)
+               (lambda (&rest args) (setq msg (apply #'format args)))))
+      (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+        (dsh-bridge-view-mode)
+        (setq-local dsh-bridge--view-content-session "s1")
+        (setq-local dsh-bridge--view-replies-session "s1")
+        (let ((inhibit-read-only t)) (insert "a pushed message"))
+        (setq-local dsh-bridge--view-replies-index nil)
+        (dsh-bridge--view-next-reply-from-rest)
+        (should (equal (buffer-string) "a pushed message"))
+        (should (null dsh-bridge--view-replies-index))
+        (should (string-match-p "no newer replies" msg)))
+      (kill-buffer "*dsh-bridge-output*"))))
+
+(ert-deftest dsh-bridge-prompt-history-position ()
+  "The prompt-history position is newest-first (k/n), absent at rest."
+  (with-temp-buffer
+    (dsh-bridge-prompt-mode)
+    (setq-local dsh-bridge--prompt-history-session "s1")
+    (setq dsh-bridge--prompt-history '(("s1" "new" "mid" "old")))
+    (setq-local dsh-bridge--prompt-history-index nil)
+    (should (equal (dsh-bridge--prompt-history-position) ""))
+    (setq-local dsh-bridge--prompt-history-index 0)
+    (should (equal (dsh-bridge--prompt-history-position) " (1/3)"))
+    (setq-local dsh-bridge--prompt-history-index 2)
+    (should (equal (dsh-bridge--prompt-history-position) " (3/3)"))))
+
+(ert-deftest dsh-bridge-session-update-last-active ()
+  "A turn frame's `time' folds into the session cache's `lastActive'; a missing
+time is a no-op and an unknown id is ignored."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (lastActive . 1) (live . t)))))
+    (dsh-bridge--session-update-last-active "s1" 99)
+    (should (equal (alist-get 'lastActive (dsh-bridge--session-for-id "s1")) 99))
+    (dsh-bridge--session-update-last-active "s1" nil)
+    (should (equal (alist-get 'lastActive (dsh-bridge--session-for-id "s1")) 99))
+    (dsh-bridge--session-update-last-active "s2" 5)
+    (should (null (dsh-bridge--session-for-id "s2")))))
+
+(ert-deftest dsh-bridge-user-looking-sessions-row ()
+  "The `message' turn-complete scope includes the sessions list's row at point."
+  (when (get-buffer "*dsh-bridge-output*") (kill-buffer "*dsh-bridge-output*"))
+  (when (get-buffer "*dsh-bridge-prompt*") (kill-buffer "*dsh-bridge-prompt*"))
+  (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+    (dsh-bridge-sessions-mode)
+    (let ((inhibit-read-only t))
+      (insert (propertize "s1 row" 'tabulated-list-id "s1")))
+    (goto-char (point-min))
+    (should (dsh-bridge--user-looking-p "s1"))
+    (should-not (dsh-bridge--user-looking-p "s2")))
+  (kill-buffer "*dsh-bridge-sessions*"))
 
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

@@ -582,13 +582,13 @@ export function apply(ctx: Context): void {
     if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
     const id = String(session.id)
     if (event.type === 'turn/start') {
-      broadcast(turnStartMessage(id))
+      broadcast(turnStartMessage(id, event.time))
       return
     }
     if (event.type === 'turn/end') {
       const data = event.data as { reason?: unknown } | undefined
       const reason = data?.reason as { kind?: unknown } | undefined
-      broadcast(turnCompleteMessage(id, typeof reason?.kind === 'string' ? reason.kind : 'unrecognized'))
+      broadcast(turnCompleteMessage(id, typeof reason?.kind === 'string' ? reason.kind : 'unrecognized', event.time))
       return
     }
     if (event.type === 'session/title') {

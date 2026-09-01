@@ -464,17 +464,17 @@ describe('outboxMessage', () => {
 })
 
 describe('turnStartMessage', () => {
-  it('emits one SSE data frame carrying only the session id', () => {
-    expect(turnStartMessage('session-1')).toBe(
-      'data: {"kind":"turn-start","sessionId":"session-1"}\n\n',
+  it('emits one SSE data frame carrying the session id and event time', () => {
+    expect(turnStartMessage('session-1', 1234)).toBe(
+      'data: {"kind":"turn-start","sessionId":"session-1","time":1234}\n\n',
     )
   })
 })
 
 describe('turnCompleteMessage', () => {
-  it('emits one SSE data frame carrying the turn-end reason kind', () => {
-    expect(turnCompleteMessage('session-1', 'completed')).toBe(
-      'data: {"kind":"turn-complete","sessionId":"session-1","reason":"completed"}\n\n',
+  it('emits one SSE data frame carrying the turn-end reason kind and event time', () => {
+    expect(turnCompleteMessage('session-1', 'completed', 1234)).toBe(
+      'data: {"kind":"turn-complete","sessionId":"session-1","reason":"completed","time":1234}\n\n',
     )
   })
 })

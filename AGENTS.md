@@ -30,7 +30,7 @@ PLAN.md    design notes, the locked names table, deferred decisions
 COPYING    GPL-3.0
 ```
 
-The `/dsh-bridge/*` route inventory and SSE frame kinds are documented in the header comment of `dsh-plugin/src/index.ts`; keep that comment current when routes change.
+The `/dsh-bridge/*` route inventory is documented in the header comment of `dsh-plugin/src/index.ts` (keep it current when routes change); the SSE frame payloads are documented in the doc comments on their constructors in `dsh-plugin/src/logic.ts` (`turnStartMessage`, `turnCompleteMessage`, `contextMessage`, `sessionsChangedMessage`, etc.) — update those when a frame shape changes.
 
 ## Names (locked)
 

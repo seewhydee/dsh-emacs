@@ -309,7 +309,7 @@ The choice of string contents is based on `dsh-bridge--status-state'."
     (let* ((state (dsh-bridge--status-state session-id))
            (char
 			(pcase dsh-bridge-status-indicator
-              ('geometric (pcase state ('idle "●")  ('running "●")  (_ "?")))
+              ('geometric (pcase state ('idle "●")  ('running "■")  (_ "?")))
               ('emoji (pcase state ('idle "🟢") ('running "🟡") (_ "⚪")))
               (_ (pcase state ('idle "✓")  ('running "…")  (_ "?")))))
            (face
@@ -800,7 +800,9 @@ text with no complete event terminator."
   "Dispatch decoded SSE EVENTS for the DSH bridge.
 `turn-start'/`turn-complete' update the status tracker, re-render the
 affected surfaces, and refresh the model cache (a turn boundary is when
-a web-UI model change takes effect); `sessions-changed' debounces a
+a web-UI model change takes effect); `turn-complete' also folds the frame's
+`time' into the session cache's `lastActive' so the sessions list's Age cell
+and row order stay live; `sessions-changed' debounces a
 sessions-list refetch; outbox notices are handled by the caller
 (`receive')."
   (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed"))
@@ -820,6 +822,9 @@ sessions-list refetch; outbox notices are handled by the caller
 			  (reason (alist-get 'reason event)))
 		  (when id
 			(dsh-bridge--status-set id 'idle)
+			;; Fold the turn's timestamp into the session cache so the
+			;; sessions-list Age cell and row order stay live (F4).
+			(dsh-bridge--session-update-last-active id (alist-get 'time event))
 			(dsh-bridge--status-event-render id)
 			(dsh-bridge--models-event-refresh id)
 			(dsh-bridge--turn-complete-act id reason))))
@@ -830,7 +835,9 @@ sessions-list refetch; outbox notices are handled by the caller
 		  (when (and id (numberp used) (numberp window))
 			(setq dsh-bridge--session-context
 				  (assoc-delete-all id dsh-bridge--session-context))
-			(push (cons id (cons used window)) dsh-bridge--session-context))))))))
+			(push (cons id (cons used window)) dsh-bridge--session-context)
+			;; Redraw the prompt header's context segment in the same tick.
+			(force-mode-line-update t))))))))
 
 (defvar dsh-bridge--sessions-changed-timer nil
   "Timer for debounced sessions-list refetch after a `sessions-changed' frame.")
@@ -1096,6 +1103,16 @@ This is the `dsh-bridge--sessions-cache' entry with `id' matching ID.
 See `dsh-bridge--sessions-cache' for the session data format."
   (seq-find (lambda (s) (equal (alist-get 'id s) id))
 			dsh-bridge--sessions-cache))
+
+(defun dsh-bridge--session-update-last-active (session-id time)
+  "Update SESSION-ID's `lastActive' in the sessions cache to TIME (ms-epoch).
+TIME is the turn frame's `time' field; nil leaves the value unchanged (an older
+plugin omits it).  A no-op when the cache has no row for SESSION-ID.  Call
+before re-rendering the sessions list so the Age cell and sort order go live."
+  (when time
+    (let ((session (dsh-bridge--session-for-id session-id)))
+      (when session
+        (setf (alist-get 'lastActive session) time)))))
 
 (defun dsh-bridge--apply-session-directory (session-id cwd &optional buffer)
   "Set BUFFER's `default-directory' to SESSION-ID's workspace.
@@ -1373,6 +1390,18 @@ the newest prompt.")
   (and dsh-bridge--prompt-history-session
 	   (cdr (assoc dsh-bridge--prompt-history-session dsh-bridge--prompt-history))))
 
+(defun dsh-bridge--prompt-history-position ()
+  "Position string \" (k/n)\" for the prompt-history walk, or \"\" at rest.
+Newest-first, 1-indexed (`(1/n)' is the newest).  Rendered only while
+`dsh-bridge--prompt-history-index' is non-nil, mirroring the DSH-View buffer's
+reply-position segment.  Reads the buffer-local index and the cached list; no
+I/O in a display path."
+  (let ((list (and dsh-bridge--prompt-history-index
+				   (dsh-bridge--prompt-history-list))))
+	(if list
+		(format " (%d/%d)" (1+ dsh-bridge--prompt-history-index) (length list))
+	  "")))
+
 (defun dsh-bridge--prompt-history-refresh ()
   "Return the prompt list (newest first) for the prompt buffer's effective session.
 Fetches `GET /prompts' when the buffer is not already browsing a history for
@@ -1636,21 +1665,25 @@ recomputes on the next redisplay)."
   "Return the header line for the DSH-Prompt buffer.
 Header line format:
 
- <status> <label>[ · <model>][ · <ctx%>][ ✓ sent HH:MM]
+ <status> <label>[ (k/n)][ · <model>][ · <ctx%>][ ✓ sent HH:MM]
 
 The model and context segments stay empty until their first successful
-fetch.  Editing the text clears the sent marker."
+fetch.  Editing the text clears the sent marker.  The `(k/n)' segment appears
+while `M-p'/'M-n' walk the prompt history (see
+`dsh-bridge--prompt-history-position')."
   (let* ((session (dsh-bridge--prompt-status-session))
 		 (status (dsh-bridge--status-glyph session))
 		 (label (or (and session (dsh-bridge--session-label session)) ""))
 		 (model (dsh-bridge--prompt-model-label session))
 		 (context (dsh-bridge--prompt-context-label session))
-		 (sent (dsh-bridge--prompt-sent-marker session)))
+		 (sent (dsh-bridge--prompt-sent-marker session))
+		 (hist (dsh-bridge--prompt-history-position)))
 	;; The returned string is %-escaped (see `header-line-format'),
 	;; so any bare % from the context percentage, or a session title,
 	;; must be turned into %%.
 	(string-replace "%" "%%"
 					(concat " " (if (string-empty-p status) label (concat status " " label))
+							hist
 							(and model (concat " · " model))
 							(and context (concat " · " context))
 							sent))))
@@ -1753,6 +1786,38 @@ fill or a turn-complete refetch."
 		 (cdr (assoc dsh-bridge--view-replies-session
 					 dsh-bridge--replies-cache)))))
 
+(defun dsh-bridge--view-replies-cache-refresh (session-id)
+  "Force-refresh the reply cache for SESSION-ID and keep a cycling view aligned.
+Fetches `GET /replies' for SESSION-ID and updates
+`dsh-bridge--replies-cache'.  When *dsh-bridge-output* shows SESSION-ID, also
+re-bind its reply list to SESSION-ID, shift `dsh-bridge--view-replies-index' by
+the head delta (new replies land at the newest end, so the shown reply's index
+grows by the list-length difference) and re-render the header.  No buffer text
+is touched, so a mid-browse view is never clobbered.  Returns the fresh list or
+nil; a session that is neither shown nor cached is left alone."
+  (when (or (dsh-bridge--view-shown-session-p session-id)
+			(assoc session-id dsh-bridge--replies-cache))
+	(let* ((old (cdr (assoc session-id dsh-bridge--replies-cache)))
+		   (path (dsh-bridge--path "/replies" session-id))
+		   (result (dsh-bridge--request "GET" path nil))
+		   (alist (cdr result))
+		   (replies (and alist (alist-get 'replies alist))))
+	  (when replies
+		(setq dsh-bridge--replies-cache
+			  (assoc-delete-all session-id dsh-bridge--replies-cache))
+		(push (cons session-id replies) dsh-bridge--replies-cache)
+		(when (dsh-bridge--view-shown-session-p session-id)
+		  (with-current-buffer "*dsh-bridge-output*"
+			(setq-local dsh-bridge--view-replies-session session-id)
+			(when (and dsh-bridge--view-replies-index old)
+			  (let ((delta (- (length replies) (length old))))
+				(when (/= delta 0)
+				  (setq dsh-bridge--view-replies-index
+						(max 0 (min (1- (length replies))
+									(+ dsh-bridge--view-replies-index delta)))))))
+			(setq header-line-format (dsh-bridge--view-header-line)))))
+	  replies)))
+
 (defun dsh-bridge--view-reply-index (replies text)
   "Index of TEXT in REPLIES (newest first), or nil when not found."
   (seq-position replies text #'equal))
@@ -1769,10 +1834,12 @@ fill or a turn-complete refetch."
 (defun dsh-bridge-view-previous-reply ()
   "Show the previous (older) assistant reply of the shown session.
 The current content is saved as the anchor; `M-n' walks back toward it and
-restores it at the newest reply.  The session's reply list is fetched on
-first use."
+restores it at the newest reply.  Entering navigation from rest force-refreshes
+the session's reply list, so the anchor lookup and the `(k/n)' count are
+current; subsequent steps reuse the cache."
   (interactive)
-  (let ((replies (dsh-bridge--view-replies-refresh)))
+  (let ((replies (dsh-bridge--view-replies-refresh
+				  (null dsh-bridge--view-replies-index))))
 	(if (null replies)
 		(message "dsh-bridge: no replies in this session")
 	  (if (null dsh-bridge--view-replies-index)
@@ -1788,11 +1855,32 @@ first use."
 			  (message "dsh-bridge: at the oldest reply")
 			(dsh-bridge--view-show-reply next replies)))))))
 
+(defun dsh-bridge--view-next-reply-from-rest ()
+  "At rest, look for a newer reply and, if one exists, step to it.
+Force-refreshes the reply list; if the shown text is no longer the newest entry
+(newer replies arrived on the host), adopt it as the anchor and step one newer,
+mirroring `dsh-bridge-view-previous-reply' in reverse.  When the text is still
+the newest (or is not a known reply), report \"no newer replies\"."
+  (let ((replies (dsh-bridge--view-replies-refresh t)))
+	(if (null replies)
+		(message "dsh-bridge: no replies in this session")
+	  (let* ((text (buffer-string))
+			 (k (dsh-bridge--view-reply-index replies text)))
+		(cond
+		 ((null k) (message "dsh-bridge: no newer replies"))
+		 ((zerop k) (message "dsh-bridge: no newer replies"))
+		 (t
+		  ;; Adopt the shown text as the anchor and step one newer; the reply
+		  ;; index is set to the shown reply's position (k-1) by
+		  ;; `dsh-bridge--view-show-reply'.
+		  (setq-local dsh-bridge--view-replies-anchor text)
+		  (dsh-bridge--view-show-reply (1- k) replies)))))))
+
 (defun dsh-bridge-view-next-reply ()
   "Show the next (newer) assistant reply; at the newest, restore the anchor."
   (interactive)
   (if (null dsh-bridge--view-replies-index)
-	  (message "dsh-bridge: no newer replies")
+	  (dsh-bridge--view-next-reply-from-rest)
 	(if (zerop dsh-bridge--view-replies-index)
 		(progn
 		  (setq-local dsh-bridge--view-replies-index nil)
@@ -2907,8 +2995,8 @@ the sessions cache only; never hits the host."
   "Re-render surfaces showing SESSION-ID after a tracker change.
 The output buffer re-renders its header only when it shows this session; the
 sessions list re-prints only the affected row.	The prompt buffer's `(:eval)'
-header picks the change up on the next redisplay, so it needs no explicit
-re-render here."
+header repaints on the next redisplay; `force-mode-line-update' ensures that
+paint lands in the same tick as the other surfaces."
   (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
 	(with-current-buffer "*dsh-bridge-output*"
 	  (when (and (eq major-mode 'dsh-bridge-view-mode)
@@ -2918,18 +3006,24 @@ re-render here."
 	(with-current-buffer "*dsh-bridge-sessions*"
 	  (when (eq major-mode 'dsh-bridge-sessions-mode)
 		(dsh-bridge--status-reprint-row session-id)))))
+  ;; Redraw header/mode lines immediately so the prompt buffer's `(:eval)'
+  ;; header picks the tracker change up in the same paint (not just on the next
+  ;; unrelated redisplay).
+  (force-mode-line-update t)
 
 (defun dsh-bridge--status-reprint-row (session-id)
   "Re-print only the sessions-list row for SESSION-ID from the tracker.
 Updates that row's entry in `tabulated-list-entries' and re-displays without
-re-fetching (the sessions buffer would otherwise stay stale until `g')."
+re-fetching (the sessions buffer would otherwise stay stale until `g').  The
+print re-sorts by the active `Age' key (so a just-updated timestamp moves the
+row) and passes REMEMBER-POS so point follows the session id when it does."
   (let* ((session (dsh-bridge--session-for-id session-id))
 		 (idx (seq-position tabulated-list-entries session-id
 							(lambda (entry id) (equal (car entry) id)))))
 	(when (and session idx)
 	  (setf (nth idx tabulated-list-entries)
 			(dsh-bridge--session-entry session))
-	  (tabulated-list-print nil t))))
+	  (tabulated-list-print t t))))
 
 (defun dsh-bridge--view-shown-session-p (session-id)
   "Whether *dsh-bridge-output* is live, in view mode, and shows SESSION-ID."
@@ -2946,13 +3040,18 @@ re-fetching (the sessions buffer would otherwise stay stale until `g')."
 			  dsh-bridge--view-replies-index))))
 
 (defun dsh-bridge--user-looking-p (session-id)
-  "Whether the user is looking at SESSION-ID: the output buffer shows it, or a
-live prompt buffer follows it (its effective session is this session)."
+  "Whether the user is looking at SESSION-ID: the output buffer shows it, a
+live prompt buffer follows it (its effective session is this session), or the
+sessions list has point on its row."
   (or (dsh-bridge--view-shown-session-p session-id)
 	  (and (buffer-live-p (get-buffer "*dsh-bridge-prompt*"))
 		   (with-current-buffer "*dsh-bridge-prompt*"
 			 (and (eq major-mode 'dsh-bridge-prompt-mode)
-				  (equal (dsh-bridge--prompt-status-session) session-id))))))
+				  (equal (dsh-bridge--prompt-status-session) session-id))))
+	  (and (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
+		   (with-current-buffer "*dsh-bridge-sessions*"
+			 (and (eq major-mode 'dsh-bridge-sessions-mode)
+				  (equal (tabulated-list-get-id) session-id))))))
 
 (defun dsh-bridge--turn-reason-phrase (session-id reason)
   "A human phrase for SESSION-ID's completed turn given the REASON kind string."
@@ -2970,17 +3069,23 @@ live prompt buffer follows it (its effective session is this session)."
 (defun dsh-bridge--turn-complete-act (session-id reason)
   "Run the `dsh-bridge-turn-complete' action for SESSION-ID after a turn end.
 The `refetch' variant defers a non-popping refill (no I/O re-entrancy inside
-the SSE filter) and skips it while the user is mid reply-cycling; `message'
-phrases immediately for a session the user is looking at; nil is glyph-only."
+the SSE filter), refilling only when the view shows this session at rest; a
+mid-cycling or not-shown session gets its reply cache refreshed instead so the
+reply list and `(k/n)' counter stay current without clobbering the buffer.
+`message' phrases immediately for a session the user is looking at and also
+keeps the reply cache fresh; nil is glyph-only but still refreshes the cache."
   (cond
    ((eq dsh-bridge-turn-complete 'refetch)
-	(when (and (dsh-bridge--view-shown-session-p session-id)
-			   (not (dsh-bridge--view-cycling-p)))
-	  (run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id)))
+	(if (and (dsh-bridge--view-shown-session-p session-id)
+			 (not (dsh-bridge--view-cycling-p)))
+		(run-at-time 0 nil #'dsh-bridge--turn-complete-refetch session-id)
+	  (run-at-time 0 nil #'dsh-bridge--view-replies-cache-refresh session-id)))
    ((eq dsh-bridge-turn-complete 'message)
+	(run-at-time 0 nil #'dsh-bridge--view-replies-cache-refresh session-id)
 	(when (dsh-bridge--user-looking-p session-id)
 	  (message "dsh-bridge: %s" (dsh-bridge--turn-reason-phrase session-id reason))))
-   (t nil)))
+   (t
+	(run-at-time 0 nil #'dsh-bridge--view-replies-cache-refresh session-id))))
 
 (defun dsh-bridge--turn-complete-refetch (session-id)
   "Refill the output buffer's shown reply for SESSION-ID without popping.
