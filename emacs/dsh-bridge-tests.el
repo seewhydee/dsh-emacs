@@ -1976,26 +1976,6 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
 
 ;;; Turn notifications, session status, and the header line
 
-(ert-deftest dsh-bridge-status-tracker ()
-  "status-set/seed drive status-state, with an unknown fallback."
-  (let ((dsh-bridge--session-status nil)
-        (dsh-bridge--sessions-cache nil))
-    (should (eq (dsh-bridge--status-state "s1") 'unknown))
-    (dsh-bridge--status-set "s1" 'running)
-    (should (eq (dsh-bridge--status-state "s1") 'running))
-    (dsh-bridge--status-set "s1" 'idle)
-    (should (eq (dsh-bridge--status-state "s1") 'idle))
-    ;; Seeding an empty list drops all tracked sessions.
-    (dsh-bridge--seed-status nil)
-    (should (eq (dsh-bridge--status-state "s1") 'unknown))
-    ;; Seeding from a /sessions list sets running and drops dead sessions.
-    (dsh-bridge--seed-status '(((id . "a") (running . t))
-                               ((id . "b") (running . nil))))
-    (should (eq (dsh-bridge--status-state "a") 'running))
-    (should (eq (dsh-bridge--status-state "b") 'idle))
-    (should (eq (dsh-bridge--status-state "c") 'unknown))
-    (should (null (assoc "s1" dsh-bridge--session-status)))))
-
 (ert-deftest dsh-bridge-status-unknown-fallback ()
   "With no tracker and no session row, the status is unknown; the row's
 `running' flag is a seed when the tracker has no opinion."

@@ -288,21 +288,6 @@ numbers are known for the targeted session.")
   (when (and session-id (memq state '(running idle)))
 	(push (cons session-id state) dsh-bridge--session-status)))
 
-(defun dsh-bridge--seed-status (sessions)
-  "Seed the DSH session status tracker from a fresh SESSIONS list.
-Every listed session's `running' flag becomes its live status; any
-session that is no longer listed in SESSIONS is dropped."
-  (let ((seen '()))
-	(dolist (session sessions)
-	  (let ((id (alist-get 'id session)))
-		(when id
-		  (push id seen)
-		  (dsh-bridge--status-set id (if (alist-get 'running session)
-										 'running 'idle)))))
-	(setq dsh-bridge--session-status
-		  (seq-filter (lambda (entry) (member (car entry) seen))
-					  dsh-bridge--session-status))))
-
 (defun dsh-bridge--status-state (session-id)
   "Return SESSION-ID's display status: `running', `idle', or `unknown'.
 Saved (cold) sessions are always `unknown'; for others, the result is
@@ -1078,11 +1063,23 @@ cache the overall result in `dsh-bridge--sessions-cache'.
 See `dsh-bridge--sessions-cache' for the session data format."
   (let* ((result (dsh-bridge--request "GET" "/sessions" nil))
 		 (alist (cdr result))
-		 (sessions (and alist (assoc 'sessions alist)
-						(cdr (assoc 'sessions alist)))))
+		 (bridge-sessions-data (assoc 'sessions alist))
+		 (sessions (cdr bridge-sessions-data)))
 	(when sessions
 	  (setq dsh-bridge--sessions-cache sessions)
-	  (dsh-bridge--seed-status sessions))
+	  ;; Seed the session status tracker.  Every listed session's
+	  ;; `running' flag becomes its live status; any session that is
+	  ;; no longer listed is dropped."
+	  (let ((seen '()) id)
+		(dolist (session sessions)
+		  (when (setq id (alist-get 'id session))
+			(push id seen)
+			(dsh-bridge--status-set id (if (alist-get 'running session)
+										   'running
+										 'idle))))
+		(setq dsh-bridge--session-status
+			  (seq-filter (lambda (entry) (member (car entry) seen))
+						  dsh-bridge--session-status))))
 	sessions))
 
 ;;; Session labels
@@ -1205,21 +1202,22 @@ the last-active session (as a fallback)."
 		 (session (dsh-bridge--effective-session buffer))
 		 (status (dsh-bridge--status-glyph session))
 		 (id (dsh-bridge--buffer-session buffer))
-		 (label (cond
-			 ;; Bound buffer session: plain label.
-			 (id (dsh-bridge--session-label id))
-			 ;; Default target: (default) qualifier.
-			 (dsh-bridge-default-session
-			  (concat (dsh-bridge--session-label dsh-bridge-default-session)
-					  " (default)"))
-			 ;; Resolved last-active: (last active) qualifier.
-			 (dsh-bridge--last-resolved-active
-			  (concat (or (cdr dsh-bridge--last-resolved-active)
-						  (dsh-bridge--session-label
-						   (or (car-safe dsh-bridge--last-resolved-active)
-							   (dsh-bridge--cache-last-active))))
-					  " (last active)"))
-			 (t ""))))
+		 (label
+		  (cond
+		   ;; Bound buffer session: plain label.
+		   (id (dsh-bridge--session-label id))
+		   ;; Default target: (default) qualifier.
+		   (dsh-bridge-default-session
+			(concat (dsh-bridge--session-label dsh-bridge-default-session)
+					" (default)"))
+		   ;; Resolved last-active: (last active) qualifier.
+		   (dsh-bridge--last-resolved-active
+			(concat (or (cdr dsh-bridge--last-resolved-active)
+						(dsh-bridge--session-label
+						 (or (car-safe dsh-bridge--last-resolved-active)
+							 (dsh-bridge--cache-last-active))))
+					" (last active)"))
+		   (t ""))))
 	(concat (if (string-empty-p status) label (concat status " " label)))))
 
 (defun dsh-bridge--session-choice (session)
