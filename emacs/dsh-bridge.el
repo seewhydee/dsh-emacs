@@ -466,11 +466,10 @@ response means the route (and hence the plugin) is absent."
 											t nil dsh-bridge-timeout))))
 	(if (null buf)
 		'unreachable
-	  (let* ((response (dsh-bridge--response buf))
+	  (let* ((response (dsh-bridge--parse-response buf))
 			 (status (car response))
-			 (body (cdr response))
 			 (alist (ignore-errors
-					  (json-parse-string body :object-type 'alist))))
+					  (json-parse-string (cdr response) :object-type 'alist))))
 		(kill-buffer buf)
 		(cond
 		 ((eq status 403) 'forbidden)
@@ -702,7 +701,7 @@ restart \"dsh %s\" to complete unload"
 
 ;;; Low-level HTTP plumbing
 
-(defun dsh-bridge--response (buffer)
+(defun dsh-bridge--parse-response (buffer)
   "Return (STATUS . BODY) for BUFFER.
 STATUS is the HTTP response status code (`url-http-response-status', or nil
 when the buffer carries none); BODY is the UTF-8 text after the response
@@ -1037,13 +1036,12 @@ request\" error) only via `message', which made them hard to diagnose."
 	   ((null buf) (dsh-bridge--note-request-failure)
 		(funcall callback '(:error "request timed out") nil nil))
 	   (t
-		(let* ((response (dsh-bridge--response buf))
-			   (http-status (car response))
-			   (body (cdr response)))
+		(let* ((response (dsh-bridge--parse-response buf))
+			   (http-status (car response)))
 		  (kill-buffer buf)
 		  (when (memq http-status '(401 404))
 			(dsh-bridge--note-request-failure))
-		  (funcall callback nil body http-status)))))))
+		  (funcall callback nil (cdr response) http-status)))))))
 
 (defun dsh-bridge--request (method path payload)
   "Perform METHOD request to PATH and return (STATUS . ALIST).
@@ -1061,15 +1059,14 @@ when the body is not a JSON object."
 										   t nil dsh-bridge-timeout)))
 	  (if (null buf)
 		  (progn (dsh-bridge--note-request-failure) (cons nil nil))
-		(let* ((response (dsh-bridge--response buf))
+		(let* ((response (dsh-bridge--parse-response buf))
 			   (status (car response))
-			   (body (cdr response))
-			   (alist (condition-case nil
-						  (json-parse-string body :object-type 'alist
-											 :array-type 'list
-											 :null-object nil
-											 :false-object nil)
-						(error nil))))
+			   (alist (ignore-errors
+						(json-parse-string (cdr response)
+										   :object-type 'alist
+										   :array-type 'list
+										   :null-object nil
+										   :false-object nil))))
 		  (kill-buffer buf)
 		  (when (memq status '(401 404))
 			(dsh-bridge--note-request-failure))
