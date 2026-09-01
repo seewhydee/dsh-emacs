@@ -222,9 +222,8 @@ plugin.  Its value can be one of the following:
 (defvar dsh-bridge-default-session nil
   "The DSH bridge's default target session ID, if any.
 Set with `dsh-bridge-set-default-target', or \\`t' in the DSH-Sessions
-buffer.  The target session is used by context-free DSH commands (see
-`dsh-bridge--effective-session'); if nil, these commands try to fall
-back to the last-active session.")
+buffer.  This session is targeted by context-free DSH commands; if nil
+or invalid, the commands try to target the last-active session instead.")
 
 (defvar-local dsh-bridge--prompt-session nil
   "Session ID for the DSH-Prompt buffer.
@@ -238,7 +237,7 @@ ID is the session id that the running DeepSeek Harness (DSH) process
 resolved as last-active for a request without an explicit session.
 
 LABEL is the corresponding display label, taken from the response's
-`title' when present and from `dsh-bridge--label-for-id' otherwise.
+`title' when present and from `dsh-bridge--session-label' otherwise.
 Its value may be nil if the request is still incomplete.")
 
 (defvar dsh-bridge--view-content-session) ; forward declaration
@@ -553,7 +552,7 @@ an ordinary request error if the bridge is unavailable or incompatible."
 		   (t
 			(message "dsh bridge: no DSH installation found"))))))))))
 
-;; Install and uninstall.
+;; Install and uninstall the DSH plugin
 
 (defun dsh-bridge--install-plugin (dir)
   "Install the bundled plugin at DIR into `dsh-bridge-profile'.
@@ -708,8 +707,7 @@ STATUS is the HTTP response status code (`url-http-response-status', or nil
 when the buffer carries none); BODY is the UTF-8 text after the response
 headers (\"\" when no header terminator is present)."
   (with-current-buffer buffer
-	(let ((status (and (boundp 'url-http-response-status)
-					   url-http-response-status)))
+	(let ((status (bound-and-true-p url-http-response-status)))
 	  (goto-char (point-min))
 	  (cons status
 			(if (re-search-forward "\r?\n\r?\n" nil t)
@@ -1116,15 +1114,19 @@ buffer name or buffer, defaulting to the current buffer."
 	  (with-current-buffer buf
 		(setq default-directory (file-name-as-directory dir))))))
 
-(defun dsh-bridge--label-for-id (id)
-  "Return the display label for session ID.
+(defun dsh-bridge--session-label (session)
+  "Return the display label for SESSION.
+SESSION should be a string (a session ID), or a session data alist in
+the format described in `dsh-bridge--sessions-cache'.
+
 If the session has no title, fall back on the session ID.
 In case the session ID is invalid, return \"[Untitled Session]\"."
-  (let* ((session (and (stringp id) ; ID must be non-empty string
-					   (not (string-empty-p id))
-					   (dsh-bridge--session-for-id id)))
-		 (title (if session (dsh-bridge--session-title session))))
-	(or title (and session id) id "[Untitled Session]")))
+  (let ((alist (if (stringp session)
+				   (dsh-bridge--session-for-id session)
+				 session))
+		(id (if (stringp session) session (alist-get 'id session))))
+	(or (and alist (dsh-bridge--session-title alist))
+		id "[Untitled Session]")))
 
 (defun dsh-bridge--relative-age (ts &optional now)
   "Return a compact relative age string for ms-epoch timestamp TS.
@@ -1182,24 +1184,6 @@ to creation time, among live sessions).	 Display-only; never blocks."
 			(setq best-time t0)
 			(setq best (alist-get 'id s))))))))
 
-(defun dsh-bridge--effective-session-label (&optional buffer)
-  "Display label of BUFFER's effective session, with a qualifier.
-Buffer session -> its plain label; default target -> \"label (default)\";
-otherwise the resolved last-active label with \" (last-active)\"."
-  (let ((id (dsh-bridge--buffer-session buffer)))
-	(cond
-	 (id (dsh-bridge--label-for-id id))
-	 (dsh-bridge-default-session
-	  (format "%s (default)"
-			  (dsh-bridge--label-for-id dsh-bridge-default-session)))
-	 (dsh-bridge--last-resolved-active
-	  (format "%s (last active)"
-			  (or (cdr dsh-bridge--last-resolved-active)
-				  (dsh-bridge--label-for-id
-				   (or (car-safe dsh-bridge--last-resolved-active)
-					   (dsh-bridge--cache-last-active))))))
-	 (t ""))))
-
 (defun dsh-bridge--prompt-status-session ()
   "The session id the prompt buffer's status and `✓ sent' marker read.
 The buffer's binding, else the default target, else the resolved last-active
@@ -1213,14 +1197,29 @@ widens the rule."
 
 (defun dsh-bridge--dispatcher-header ()
   "Header string for the dispatcher: status plus the effective session.
-`<status> <label>[<qualifier>]' — the glyph is as-of-invocation (the popup
-header renders once).  `transient--original-buffer' holds the buffer the
-transient was invoked from (`transient-setup' records it before the popup is
-rendered)."
-  (let* ((buffer (or (bound-and-true-p transient--original-buffer) (current-buffer)))
+This has the format \"<status> <label>[<qualifier>]\", where the
+qualifier indicates if the DSH session is the user-specified default, or
+the last-active session (as a fallback)."
+  (let* ((buffer (or (bound-and-true-p transient--original-buffer)
+					 (current-buffer)))
 		 (session (dsh-bridge--effective-session buffer))
 		 (status (dsh-bridge--status-glyph session))
-		 (label (dsh-bridge--effective-session-label buffer)))
+		 (id (dsh-bridge--buffer-session buffer))
+		 (label (cond
+			 ;; Bound buffer session: plain label.
+			 (id (dsh-bridge--session-label id))
+			 ;; Default target: (default) qualifier.
+			 (dsh-bridge-default-session
+			  (concat (dsh-bridge--session-label dsh-bridge-default-session)
+					  " (default)"))
+			 ;; Resolved last-active: (last active) qualifier.
+			 (dsh-bridge--last-resolved-active
+			  (concat (or (cdr dsh-bridge--last-resolved-active)
+						  (dsh-bridge--session-label
+						   (or (car-safe dsh-bridge--last-resolved-active)
+							   (dsh-bridge--cache-last-active))))
+					  " (last active)"))
+			 (t ""))))
 	(concat (if (string-empty-p status) label (concat status " " label)))))
 
 (defun dsh-bridge--session-choice (session)
@@ -1334,7 +1333,7 @@ Advisory display cache only (see `dsh-bridge--last-resolved-active')."
 	(when id
 	  (setq dsh-bridge--last-resolved-active
 			(cons id (or (alist-get 'title alist)
-						 (dsh-bridge--label-for-id id)))))))
+						 (dsh-bridge--session-label id)))))))
 
 (defun dsh-bridge--region-or-buffer ()
   "Return the region text if the region is active, else the whole buffer."
@@ -1605,20 +1604,22 @@ exact text is not a reply)."
 
 (defun dsh-bridge--view-header-line ()
   "Return the header line for a DSH-View buffer.
-The header line consists of the following pieces:
-- Status indicator
-- Position in session history
-- Session name
-- Reply timestamp"
+Header line format:
+
+ <status> <session-pos> <label> · HH:MM:SS
+
+The session-pos segment is the position in the session's reply history;
+see `dsh-bridge--view-reply-position'."
   (let* ((id dsh-bridge--view-content-session)
 		 (status (dsh-bridge--status-glyph id))
 		 (pos (dsh-bridge--view-reply-position))
-		 (label (dsh-bridge--label-for-id id))
+		 (label (dsh-bridge--session-label id))
 		 (time (if dsh-bridge--view-received-at
 				   (format-time-string
 					"%H:%M:%S" (/ dsh-bridge--view-received-at 1000))
 				 (or dsh-bridge--view-timestamp ""))))
-	(concat " " status " " pos " " label " · " time)))
+	(string-replace "%" "%%"
+					(concat " " status " " pos " " label " · " time))))
 
 (defun dsh-bridge--prompt-sent-marker (session-id)
   "The \" ✓ sent HH:MM\" marker when the buffer text was just sent, else \"\".
@@ -1631,21 +1632,27 @@ recomputes on the next redisplay)."
 	  "")))
 
 (defun dsh-bridge--prompt-header-line ()
-  "Header line for the prompt buffer: status, session, model, context, sent.
-`<status> <label>[ · <model>][ · <ctx%>][ ✓ sent HH:MM]' — recomputed on
-redisplay from caches only (the buffer's `(:eval ...)' header).  The model and
-context segments stay empty until their first successful fetch.  Editing the
-text clears the `✓ sent' marker with no event plumbing."
+  "Return the header line for the DSH-Prompt buffer.
+Header line format:
+
+ <status> <label>[ · <model>][ · <ctx%>][ ✓ sent HH:MM]
+
+The model and context segments stay empty until their first successful
+fetch.  Editing the text clears the sent marker."
   (let* ((session (dsh-bridge--prompt-status-session))
 		 (status (dsh-bridge--status-glyph session))
-		 (label (dsh-bridge--effective-session-label))
+		 (label (or (and session (dsh-bridge--session-label session)) ""))
 		 (model (dsh-bridge--prompt-model-label session))
 		 (context (dsh-bridge--prompt-context-label session))
 		 (sent (dsh-bridge--prompt-sent-marker session)))
-	(concat " " (if (string-empty-p status) label (concat status " " label))
-			(and model (concat " · " model))
-			(and context (concat " · " context))
-			sent)))
+	;; The returned string is %-escaped (see `header-line-format'),
+	;; so any bare % from the context percentage, or a session title,
+	;; must be turned into %%.
+	(string-replace "%" "%%"
+					(concat " " (if (string-empty-p status) label (concat status " " label))
+							(and model (concat " · " model))
+							(and context (concat " · " context))
+							sent))))
 
 (defvar dsh-bridge-view-mode-map)
 
@@ -1848,7 +1855,7 @@ session's last-sent text, confirm first; editing one character suppresses it.
 				 (dsh-bridge--resend-guard-p guard-session
 											 (dsh-bridge--region-or-buffer)))
 		(unless (y-or-n-p (format "Resend same prompt to session \"%s\"? "
-								  (dsh-bridge--label-for-id guard-session)))
+								  (dsh-bridge--session-label guard-session)))
 		  (user-error "dsh-bridge: aborted"))))
 	(dsh-bridge-send-text (dsh-bridge--region-or-buffer) session-id
 						  #'dsh-bridge--prompt-exit)))
@@ -1910,9 +1917,8 @@ buffer re-fetches the shown session's reply."
 					  (dsh-bridge--path "/output" target)
 					  nil
 	  (lambda (status body http-status)
-		(let* ((alist (condition-case nil
-						  (json-parse-string body :object-type 'alist)
-						(error nil)))
+		(let* ((alist (ignore-errors
+						(json-parse-string body :object-type 'alist)))
 			   (err (dsh-bridge--error-message status http-status alist)))
 		  (cond
 		   (err (message "dsh-bridge: %s" err))
@@ -1939,7 +1945,7 @@ buffer re-fetches the shown session's reply."
 			  (pop-to-buffer "*dsh-bridge-output*")
 			  (message "dsh-bridge: reply fetched from session \"%s\""
 					   (or (alist-get 'title alist)
-						   (dsh-bridge--label-for-id shown-id)))))))))))
+						   (dsh-bridge--session-label shown-id)))))))))))
 
 ;;;###autoload
 (defun dsh-bridge-receive ()
@@ -2329,7 +2335,7 @@ the default target again.  Only this buffer is affected."
 	(message "dsh-bridge: prompt buffer %s"
 			 (if (null id)
 				 "follows the default target"
-			   (format "bound to session \"%s\"" (dsh-bridge--label-for-id id))))))
+			   (format "bound to session \"%s\"" (dsh-bridge--session-label id))))))
 
 (easy-menu-define dsh-bridge-prompt-menu dsh-bridge-prompt-mode-map
   "Menu bar menu for the `*dsh-bridge-prompt*' buffer."
@@ -2410,7 +2416,7 @@ pin to write, and clearing has no host round-trip."
   (dsh-bridge--refresh-prompt-directory)
   (message "dsh-bridge: default target %s"
 		   (if session-id
-			   (dsh-bridge--label-for-id session-id)
+			   (dsh-bridge--session-label session-id)
 			 "last-active")))
 
 (defun dsh-bridge-clear-default-target ()
@@ -2695,7 +2701,7 @@ cold sessions alike."
   (let ((id (tabulated-list-get-id)))
 	(if (null id)
 		(message "dsh-bridge: no session under point")
-	  (let ((label (dsh-bridge--label-for-id id)))
+	  (let ((label (dsh-bridge--session-label id)))
 		(if (not (y-or-n-p (format "Archive session %s?" label)))
 			(message "dsh-bridge: aborted")
 		  (let* ((result (dsh-bridge--request "POST" "/sessions/archive"
@@ -2772,7 +2778,7 @@ The row's workspace id comes from the cached session; prompts for the new title
 		(message "dsh-bridge: no session under point")
 	  (if (null workspaceId)
 		  (message "dsh-bridge: session \"%s\" has no workspace to rename"
-				   (dsh-bridge--label-for-id id))
+				   (dsh-bridge--session-label id))
 		(let* ((current (or (alist-get 'workspace session) ""))
 			   (title (read-string (format "Rename workspace %s to: " current) current)))
 		  (if (string-empty-p title)
@@ -2962,7 +2968,7 @@ live prompt buffer follows it (its effective session is this session)."
 				("blocked" "blocked")
 				(_ "ended"))))
 	(format "session \"%s\" %s"
-			(dsh-bridge--label-for-id session-id)
+			(dsh-bridge--session-label session-id)
 			verb)))
 
 (defun dsh-bridge--turn-complete-act (session-id reason)

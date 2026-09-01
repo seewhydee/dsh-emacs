@@ -152,29 +152,36 @@ round-trip."
     (should (equal (all-completions "" table-seen)
                    '("live-1" "saved-1" "(last-active)")))))
 
-(ert-deftest dsh-bridge-effective-session-label ()
-  "Header labels carry the right qualifier."
-  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+(ert-deftest dsh-bridge-dispatcher-header-labels ()
+  "The dispatcher header labels the effective session with the right qualifier."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (dsh-bridge-status-indicator 'none))
     ;; Bound buffer session: plain label.
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
-      (should (equal (dsh-bridge--effective-session-label) "T")))
+      (should (equal (dsh-bridge--dispatcher-header) "T")))
     ;; Default target: (default) qualifier.
     (with-temp-buffer
       (let ((dsh-bridge-default-session "s1"))
-        (should (equal (dsh-bridge--effective-session-label) "T (default)"))))
+        (should (equal (dsh-bridge--dispatcher-header) "T (default)"))))
     ;; Resolved last-active: (last active) qualifier.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active '("s1" . "T")))
-        (should (equal (dsh-bridge--effective-session-label)
+        (should (equal (dsh-bridge--dispatcher-header)
+                       "T (last active)"))))
+    ;; Resolved last-active without a label: computed from the id.
+    (with-temp-buffer
+      (let ((dsh-bridge-default-session nil)
+            (dsh-bridge--last-resolved-active '("s1" . nil)))
+        (should (equal (dsh-bridge--dispatcher-header)
                        "T (last active)"))))
     ;; Nothing bound and nothing resolved: no qualifier.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active nil))
-        (should (equal (dsh-bridge--effective-session-label) ""))))))
+        (should (equal (dsh-bridge--dispatcher-header) ""))))))
 
 (ert-deftest dsh-bridge-session-unknown-message ()
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))
@@ -210,13 +217,17 @@ recorded."
 ;;; Session labels
 
 (ert-deftest dsh-bridge-session-label-precedence ()
-  "The label is the title, else the raw id."
+  "The label is the title, else the raw id; alist inputs work too."
   (let ((dsh-bridge--sessions-cache
          '(((id . "s1") (title . "T") (cwd . "/x"))
            ((id . "s2") (cwd . "/x/y")))))
-    (should (equal (dsh-bridge--label-for-id "s1") "T"))
-    (should (equal (dsh-bridge--label-for-id "s2") "s2"))
-    (should (equal (dsh-bridge--label-for-id "missing") "missing"))))
+    (should (equal (dsh-bridge--session-label "s1") "T"))
+    (should (equal (dsh-bridge--session-label "s2") "s2"))
+    (should (equal (dsh-bridge--session-label "missing") "missing"))
+    (should (equal (dsh-bridge--session-label nil) "[Untitled Session]"))
+    ;; Session data alists are accepted directly (no cache lookup).
+    (should (equal (dsh-bridge--session-label '((id . "s3") (title . "T3"))) "T3"))
+    (should (equal (dsh-bridge--session-label '((id . "s4"))) "s4"))))
 
 (ert-deftest dsh-bridge-workspace-label ()
   "The workspace label is the title, else the cwd basename, else the cwd."
@@ -540,8 +551,8 @@ binds the compose keys plus fetch/set-session/list."
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "M-n"))
               #'dsh-bridge-prompt-next-history)))
 
-(ert-deftest dsh-bridge-prompt-header-qualifiers ()
-  "The prompt header names the effective session with its qualifier."
+(ert-deftest dsh-bridge-prompt-header-session-label ()
+  "The prompt header names the effective session, without qualifiers."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
     ;; Bound buffer session: plain label (header refreshes after binding).
     (with-temp-buffer
@@ -551,8 +562,9 @@ binds the compose keys plus fetch/set-session/list."
     (with-temp-buffer
       (let ((dsh-bridge-default-session "s1"))
         (dsh-bridge-prompt-mode)
-        (should (string-match-p "T (default)"
-                                (dsh-bridge--prompt-header-line)))))
+        (should (string-match-p " T$" (dsh-bridge--prompt-header-line)))
+        (should-not (string-match-p "(default)"
+                                    (dsh-bridge--prompt-header-line)))))
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active nil)
@@ -560,7 +572,7 @@ binds the compose keys plus fetch/set-session/list."
         (dsh-bridge-prompt-mode)
         ;; Nothing bound and nothing resolved: the header shows only the status.
         (should (string-match-p "●" (dsh-bridge--prompt-header-line)))
-        (should-not (string-match-p "(last-active)"
+        (should-not (string-match-p "Untitled"
                                     (dsh-bridge--prompt-header-line)))))))
 
 (ert-deftest dsh-bridge-set-buffer-session-binds ()
@@ -2067,6 +2079,18 @@ and pushed messages."
       (should (string-match-p "· " (dsh-bridge--view-header-line)))
       (should-not (string-match-p "↓" (dsh-bridge--view-header-line))))))
 
+(ert-deftest dsh-bridge-view-header-percent-escaped ()
+  "A `%' in the session title is escaped for `header-line-format'."
+  (let ((dsh-bridge--session-status nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "50% done") (live . t)))))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-timestamp "14:22:05")
+      (setq-local dsh-bridge--view-received-at nil)
+      (should (string-match-p (regexp-quote "50%% done")
+                              (dsh-bridge--view-header-line))))))
+
 (ert-deftest dsh-bridge-prompt-sent-marker ()
   "The prompt header's `✓ sent' marker appears after a send and clears on edit."
   (let ((dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0)))))
@@ -2160,7 +2184,9 @@ when the caches are empty."
       (setq-local dsh-bridge--prompt-session "s1")
       (let ((header (dsh-bridge--prompt-header-line)))
         (should (string-match-p "Model M" header))
-        (should (string-match-p "45%" header)))))
+        ;; `header-line-format' interprets `%' constructs even in `:eval'
+        ;; results, so the header string must carry the escaped form.
+        (should (string-match-p (regexp-quote "45%%") header)))))
   (let ((dsh-bridge--session-models nil)
         (dsh-bridge--session-context nil)
         (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
