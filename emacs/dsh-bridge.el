@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -68,7 +68,7 @@
 (require 'json)
 (require 'transient)
 
-(defconst dsh-bridge-version "0.3.0"
+(defconst dsh-bridge-version "0.4.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
