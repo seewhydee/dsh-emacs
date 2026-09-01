@@ -245,8 +245,9 @@ Its value may be nil if the request is still incomplete.")
 
 (defvar dsh-bridge--sessions-cache nil
   "Cache of DeepSeek Harness session data.
-The value is a list with each entry being a row alist describing a
-session.  The row alist has the following keys:
+The value is a list where each item corresponds to one DSH session,
+formatted as an alist with these keys:
+
 - `id' (session id string)
 - `title' (string or nil)
 - `cwd' (string or nil)
@@ -1090,8 +1091,7 @@ See `dsh-bridge--sessions-cache' for the session data format."
 
 (defun dsh-bridge--session-title (session)
   "Return the title for SESSION, or nil if there is no title.
-SESSION should be a row alist containing the session data; see
-`dsh-bridge--sessions-cache' for the alist format."
+SESSION should be an alist; see `dsh-bridge--sessions-cache'."
   (let ((title (alist-get 'title session)))
 	(and (stringp title) (not (string-empty-p title)) title)))
 
@@ -1126,11 +1126,6 @@ In case the session ID is invalid, return \"[Untitled Session]\"."
 		 (title (if session (dsh-bridge--session-title session))))
 	(or title (and session id) id "[Untitled Session]")))
 
-(defun dsh-bridge--session-activity (session)
-  "Return the ms-epoch activity timestamp for SESSION (a row alist).
-Live sessions use their last event time; saved sessions their creation time."
-  (or (alist-get 'lastActive session) (alist-get 'createdAt session) 0))
-
 (defun dsh-bridge--relative-age (ts &optional now)
   "Return a compact relative age string for ms-epoch timestamp TS.
 Matches DSH's own session rows (\"now\", \"5min\", \"3h\", \"2d\", \"4mo\",
@@ -1146,8 +1141,10 @@ Matches DSH's own session rows (\"now\", \"5min\", \"3h\", \"2d\", \"4mo\",
 	 (t (format "%dy" (floor (/ secs (* 365 86400))))))))
 
 (defun dsh-bridge--workspace-label (session)
-  "Return the workspace label for SESSION (a row alist).
-The workspace title, else the cwd basename, else the raw cwd (or \"\")."
+  "Return workspace label for SESSION.
+SESSION should be an alist; see `dsh-bridge--sessions-cache'.
+The workspace label is, in order of availability, the title, cwd
+basename, raw cwd, or an empty string."
   (or (let ((ws (alist-get 'workspace session)))
 		(and (stringp ws) (not (string-empty-p ws)) ws))
 	  (let ((cwd (alist-get 'cwd session)))
@@ -1159,7 +1156,7 @@ The workspace title, else the cwd basename, else the raw cwd (or \"\")."
 ;;; Target helpers
 
 (defun dsh-bridge--buffer-session (&optional buffer)
-  "The buffer-local session affinity of BUFFER (default: the current buffer).
+  "Buffer-local session affinity of BUFFER (default: the current buffer).
 The prompt buffer's binding, else the output buffer's shown session, else nil."
   (with-current-buffer (or buffer (current-buffer))
 	(cond ((eq major-mode 'dsh-bridge-prompt-mode) dsh-bridge--prompt-session)
@@ -1234,12 +1231,12 @@ The raw id is unique, so untitled sessions never collide in completion."
 
 (defun dsh-bridge--session-annotation (session)
   "One-line completion annotation for SESSION: workspace, running, age."
-  (format "	 %s%s%s"
-		  (dsh-bridge--workspace-label session)
-		  (if (alist-get 'running session) " · running" "")
-		  (format " · %s"
-				  (dsh-bridge--relative-age
-				   (dsh-bridge--session-activity session)))))
+  (let ((ts (or (alist-get 'lastActive session)
+				(alist-get 'createdAt session) 0)))
+	(format "	 %s%s%s"
+			(dsh-bridge--workspace-label session)
+			(if (alist-get 'running session) " · running" "")
+			(format " · %s" (dsh-bridge--relative-age ts)))))
 
 (defun dsh-bridge--session-completion-table (choices)
   "Completion table over CHOICES, an alist of (STRING . SESSION).
@@ -2481,7 +2478,8 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 (defun dsh-bridge--session-entry (session)
   "Return a `tabulated-list' entry (ID . COLS) for SESSION (a row alist)."
   (let* ((id (alist-get 'id session))
-		 (activity (dsh-bridge--session-activity session))
+		 (activity (or (alist-get 'lastActive session)
+					   (alist-get 'createdAt session) 0))
 		 (age (propertize (dsh-bridge--relative-age activity)
 						  'dsh-bridge-age-ts activity))
 		 (workspace (dsh-bridge--workspace-label session))
