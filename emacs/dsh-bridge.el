@@ -2427,8 +2427,13 @@ pin to write, and clearing has no host round-trip."
 ;;; The sessions buffer
 
 (defface dsh-bridge-default-target-face
-  '((t :inherit bold :foreground "ForestGreen"))
-  "Face for the default-target session in `*dsh-bridge-sessions*'."
+  '((t :inherit font-lock-keyword-face))
+  "Face for the default-target session in the DSH-Sessions buffer."
+  :group 'dsh-bridge)
+
+(defface dsh-bridge-untitled-face
+  '((t :inherit font-lock-comment-face))
+  "Face for \"[Untitled Session]\" in the DSH-Sessions buffer."
   :group 'dsh-bridge)
 
 (defface dsh-bridge-status-running-face
@@ -2444,11 +2449,6 @@ pin to write, and clearing has no host round-trip."
 (defface dsh-bridge-status-unknown-face
   '((t :inherit shadow))
   "Face for the unknown session status glyph (shadow)."
-  :group 'dsh-bridge)
-
-(defface dsh-bridge-untitled-face
-  '((t :inherit shadow :slant italic))
-  "Face for the \"[Untitled Session]\" placeholder in `*dsh-bridge-sessions*'."
   :group 'dsh-bridge)
 
 (defun dsh-bridge--default-target-marker (session)
