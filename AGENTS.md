@@ -1,0 +1,122 @@
+# AGENTS.md
+
+`dsh-emacs-bridge` is a two-way bridge between [Emacs](https://www.gnu.org/software/emacs/) and a running DeepSeek Harness (DSH) session. It moves text in both directions over loopback HTTP: Emacs is a companion to a live session, and you can compose prompts in Emacs and read DSH's replies there, but it is not a replacement client. One of the project's design principles is to let DSH shoulder onerous model-wrangling tasks, such as streaming voluminous chain-of-thought tokens.
+
+## Components
+
+- `dsh-plugin/` — the DSH plugin, an npm package named `dsh-emacs-bridge` (Cordis id `dsh-bridge`). A host half (loopback HTTP routes plus an SSE stream) and a browser client half (the "Send to Emacs" action and composer-draft push).
+- `emacs/dsh-bridge.el` — the Emacs package, feature `dsh-bridge`, symbol prefix `dsh-bridge-` (internal helpers `dsh-bridge--`).
+
+## Repository layout
+
+```
+dsh-plugin/
+  src/index.ts            host plugin: thin route wiring over the pure logic below
+  src/logic.ts            pure, dependency-free decision logic (no Cordis/dsh runtime imports)
+  src/outbox.ts           pure bounded DSH→Emacs outbox
+  src/client/             browser client plugin (SendToEmacs.tsx, EmacsMiniIcon.tsx, locales.ts, index.ts)
+  tests/                  Vitest specs for the pure modules
+  cordis.patch.yml        bundle patch that inserts the `dsh-bridge` row (id + name)
+  package.json            version, `dsh.client` mount, peerDependencies
+  tsdown.config.ts        host build → ESM lib/index.js
+  tsdown.client.config.ts browser build → CJS lib/client.js (replicates the harness client-artifact contract)
+  tsconfig.json / vitest.config.ts
+emacs/
+  dsh-bridge.el           the whole Emacs package (single file)
+  dsh-bridge-tests.el     ERT tests
+Makefile   build / package / test / clean
+README.md  user-facing install, usage, permissions and failure bounds
+PLAN.md    design notes, the locked names table, deferred decisions
+COPYING    GPL-3.0
+```
+
+The `/dsh-bridge/*` route inventory and SSE frame kinds are documented in the header comment of `dsh-plugin/src/index.ts`; keep that comment current when routes change.
+
+## Names (locked)
+
+| Layer | Name |
+|---|---|
+| npm package | `dsh-emacs-bridge` (unscoped) |
+| Cordis id (plugin row / HMR target) | `dsh-bridge` |
+| Emacs feature / file | `dsh-bridge` / `dsh-bridge.el`, prefix `dsh-bridge-` |
+
+These names appear across README, Makefile, `package.json`, `cordis.patch.yml`, both source trees, and the `/status` identity route. Renaming one means updating every reference together.
+
+## Commands
+
+```sh
+make build     # install deps if needed, build the plugin → dsh-plugin/lib/index.js + lib/client.js
+make package   # build, then stage dsh-bridge-<version>.tar (Emacs package bundling the built plugin)
+make test      # pnpm test in dsh-plugin/ + ERT via emacs --batch
+make clean     # remove .package/ and dsh-bridge-*.tar
+```
+
+Inside `dsh-plugin/`: `pnpm install`, `pnpm build` (`tsdown && tsdown --config tsdown.client.config.ts`), `pnpm test` (`vitest run`).
+
+`make build` falls back to invoking `tsdown` directly when `pnpm build` refuses a symlinked `node_modules`; preserve that fallback.
+
+Install: `M-x package-install-file` on the tar, then `M-x dsh-bridge-install-plugin` to install the bundled plugin into DSH.
+
+## Version single source of truth
+
+The `;; Version:` header of `emacs/dsh-bridge.el` is the single source of truth. Two copies must agree with it, and `make package` refuses to build when either drifts:
+
+- the `dsh-bridge-version` defconst in `emacs/dsh-bridge.el` (runtime staleness comparison against `GET /dsh-bridge/status`);
+- the `version` field of `dsh-plugin/package.json` (what a source-checkout install reports).
+
+Bump all three at once.
+
+## Architecture rules
+
+### Host plugin (`dsh-plugin/src/`)
+
+- `index.ts` is thin wiring. Keep every decision that can be pure in `logic.ts` (and the outbox in `outbox.ts`); those modules import no Cordis/dsh runtime so Vitest exercises them without booting a host. Do not move runtime imports into them.
+- The plugin `inject` list is `['agents', 'webServer', 'sessions', 'sessionPersistence']`. Optional services — `sessionProjectionCache`, `sessionProjections`, `workspaceRegistry`, `agentDefaultModel`, `agentPresets`, `sessionTitle` — are read with `ctx.get(...)` and must tolerate `undefined`: a profile lacking one must still boot and serve a degraded-but-working bridge. Follow the existing pattern: a minimal structural interface, a cast, and a documented fallback. Both lists mirror `src/index.ts`; keep them in sync.
+- All routes live under the `/dsh-bridge` prefix, registered once inside `ctx.effect(() => webServer.register({...}))`; `register()` returns a disposer so a config hot-reload re-applies cleanly. Every contribution is an effect — `ctx.effect()` / `ctx.on()` / `ctx.inject()`, never a bare registration.
+- Bearer auth is required on every route except `/token` and `/status` (fenced to loopback peer + origin) and `/events` (EventSource cannot set headers, so the token is a query parameter). Do not add or loosen a route's fence without updating README.md's "Permissions, authentication, and failure bounds".
+- Target resolution is host-side, last-active-by-default, with on-demand resume of cold (persisted-only) sessions. Preserve the failure semantics: 404 unknown id, 409 subagent-owned or no-active-session, 413 oversize body.
+- Model selection is proxied through the host's own `session.models` / `session.selectModel` RPCs over loopback `/api`, so parity with the web UI is exact. Do not replace this with a local copy of the per-session selection ref.
+
+### Client plugin (`dsh-plugin/src/client/`)
+
+- The "Send to Emacs" action registers into the `conversation.chat.assistant-actions` slot. The locale namespace is `dsh-emacs-bridge`; `zh` is the key-set source of truth and `en` must remain a complete mirror (`satisfies Record<DshBridgeKey, string>`).
+- `tsdown.client.config.ts` replicates the harness's client-artifact contract (factory-form banner/footer/intro wrapper, module-table externals, bundle-purity gate, `define` substitutions) because the harness's shared preset is repo-locked and cannot run for an out-of-tree package. Keep it in sync with the harness preset on any DSH version bump.
+
+### Build and restart discipline
+
+- `cordis.patch.yml` edits and client-bundle changes hot-reload; host plugin code and `package.json` (manifest) changes require a `dsh web` restart.
+- The harness is pre-release with no compatibility promise (see `peerDependencies` in `dsh-plugin/package.json` for the pinned range). On any version bump, re-verify the Cordis service seams and the client-bundle artifact contract.
+
+### Emacs package (`emacs/dsh-bridge.el`)
+
+- Single-file package, `lexical-binding: t`, feature `dsh-bridge`. All symbols use the `dsh-bridge-` prefix; internal helpers use `dsh-bridge--`.
+- User-tunable behavior is a `defcustom` in the `dsh-bridge` group; do not hardcode what should be configurable.
+- HTTP uses `url-retrieve` + `json.el`; the bearer token is read from the token file. SSE notifications use `make-network-process` with chunked decoding and reconnect-with-retry; keep the latched start/stop (`dsh-bridge-notifications-start` / `dsh-bridge-notifications-stop`) semantics intact.
+- Buffer modes derive from `special-mode` (DSH-View), `tabulated-list-mode` (DSH-Sessions), and `markdown-mode` falling back to `text-mode` (DSH-Prompt). The dispatcher is a `transient-define-prefix`.
+- Requires Emacs 29.1+. Paths given to `dsh-bridge-dsh-command` are not tilde-expanded; document full paths.
+- ERT tests live in `emacs/dsh-bridge-tests.el` and run headless.
+
+## Testing
+
+- Pure plugin logic is covered by Vitest (`dsh-plugin/tests/*.spec.ts`). Add specs for `logic.ts` and `outbox.ts` behavior rather than `index.ts` wiring.
+- Elisp helpers are covered by ERT, run in batch via `make test`.
+- Tests describe behavior: when a change alters observable behavior, update its test in the same change.
+- A change is complete when `make build && make test` passes.
+
+## Security and failure bounds
+
+- Loopback only: no route may bind beyond loopback, and no third-party service is contacted. Keep the peer-address + origin fences on `/token` and `/status`.
+- Shared bearer token at `$DSH_HOME/dsh-bridge-token` (default `~/.dsh/dsh-bridge-token`), generated on first use with mode 0600, compared constant-time.
+- HTTP request bodies are capped (currently 1 MiB, 413 on oversize).
+- The DSH→Emacs outbox is bounded (currently 100 unacknowledged entries, `OUTBOX_DEFAULT_CAP` in `outbox.ts`), evicts the oldest, and reports overflow.
+
+These are user-visible invariants; any change must update README.md's "Permissions, authentication, and failure bounds" section alongside the code.
+
+## Licensing and hygiene
+
+- Every source file carries the GPL-3.0-or-later header (see `COPYING`); add it to new files.
+- Build outputs and dependencies are gitignored (`node_modules`, `lib/`, `.package/`, `dsh-bridge-*.tar`, elisp artifacts, `pnpm-lock.yaml`). Keep source committed and artifacts ignored.
+
+## Adjacent reference trees (not assumed)
+
+For background, the DeepSeek Harness sources may be present in a sibling directory (`../deepseek-harness/`) and the Emacs sources in `../emacs-*/`. The harness's own `AGENTS.md` and `docs/`, and the Emacs `lisp/`/`lib-src/` sources, are useful for verifying service seams and details. Do not assume these directories exist; if they do, they must be treated as reference-only and not part of this repository. The project must build and test standalone, and anything this repo relies on knowing about the harness's contracts must be captured in-repo. For instance, this is why `tsdown.client.config.ts` inlines the client-artifact contract instead of importing the harness's shared preset.
