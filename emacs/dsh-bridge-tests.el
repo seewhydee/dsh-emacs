@@ -153,42 +153,51 @@ round-trip."
                    '("live-1" "saved-1" "(last-active)")))))
 
 (ert-deftest dsh-bridge-dispatcher-header-labels ()
-  "The dispatcher header labels the effective session with the right qualifier."
+  "The dispatcher header labels the effective session with the right qualifier.
+A leading space (protecting the status glyph from the menu cursor) is
+present iff the indicator style produces a glyph."
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
-        (dsh-bridge-status-indicator 'none))
+        (dsh-bridge--session-status '(("s1" . idle)))
+        (dsh-bridge-status-indicator 'geometric))
     ;; Bound buffer session: plain label.
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (setq-local dsh-bridge--prompt-session "s1")
-      (should (equal (dsh-bridge--dispatcher-header) "T")))
+      ;; string-equal: the glyph carries face properties.
+      (should (string-equal (dsh-bridge--dispatcher-header) " ● T")))
     ;; Default target: (default) qualifier.
     (with-temp-buffer
       (let ((dsh-bridge-default-session "s1"))
-        (should (equal (dsh-bridge--dispatcher-header) "T (default)"))))
+        (should (string-equal (dsh-bridge--dispatcher-header) " ● T (default)"))))
     ;; Resolved last-active: (last active) qualifier.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active '("s1" . "T")))
-        (should (equal (dsh-bridge--dispatcher-header)
-                       "T (last active)"))))
+        (should (string-equal (dsh-bridge--dispatcher-header)
+                              " ● T (last active)"))))
     ;; Resolved last-active without a label: computed from the id.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active '("s1" . nil)))
-        (should (equal (dsh-bridge--dispatcher-header)
-                       "T (last active)"))))
+        (should (string-equal (dsh-bridge--dispatcher-header)
+                              " ● T (last active)"))))
     ;; Nothing bound and nothing resolved: the cache's last-active live
     ;; session is named, with the (last active) qualifier.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active nil))
-        (should (equal (dsh-bridge--dispatcher-header) "T (last active)"))))
+        (should (string-equal (dsh-bridge--dispatcher-header) " ● T (last active)"))))
     ;; Nothing bound, resolved, or live: empty header.
     (with-temp-buffer
       (let ((dsh-bridge-default-session nil)
             (dsh-bridge--last-resolved-active nil)
             (dsh-bridge--sessions-cache nil))
-        (should (equal (dsh-bridge--dispatcher-header) ""))))))
+        (should (string-equal (dsh-bridge--dispatcher-header) ""))))
+    ;; With indicator style `none' there is no glyph, hence no leading space.
+    (with-temp-buffer
+      (let ((dsh-bridge-status-indicator 'none)
+            (dsh-bridge-default-session "s1"))
+        (should (string-equal (dsh-bridge--dispatcher-header) "T (default)"))))))
 
 (ert-deftest dsh-bridge-session-unknown-message ()
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T")))))

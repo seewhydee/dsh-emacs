@@ -1215,8 +1215,12 @@ the last-active session (as a fallback)."
 	 ((setq id (dsh-bridge--cache-last-active))
 	  (setq label (concat (dsh-bridge--session-label id) " (last active)"))))
 	(unless label (setq label ""))
-	(let ((status (or (and id (dsh-bridge--status-glyph id)) "")))
-	  (concat (if (string-empty-p status) label (concat status " " label))))))
+	(let ((status (and id (dsh-bridge--status-glyph id))))
+	  (if (and status (not (string-empty-p status)))
+		  ;; The transient menu leaves point at point-min; add a space
+		  ;; to avoid overlapping the cursor with the status glyph.
+		  (concat " " status " " label)
+		label))))
 
 (defun dsh-bridge--session-choice (session)
   "The completing-read candidate string for SESSION: title, else raw id.
