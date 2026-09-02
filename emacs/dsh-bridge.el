@@ -743,13 +743,18 @@ un-pauses it.")
   "Reconnect timer for the DSH notification listener, or nil.")
 
 (defvar dsh-bridge--notifications-raw ""
-  "Raw bytes from the DSH notification process.")
+  "Raw bytes from the DSH notification process.
+This variable is managed solely by `dsh-bridge--notifications-connect'
+and `dsh-bridge--notification-filter'.")
 
 (defvar dsh-bridge--notifications-headers-done nil
   "Non-nil once the HTTP response headers have been consumed.")
 
 (defvar dsh-bridge--notifications-sse ""
-  "Decoded, not-yet-parsed SSE text from the notification process.")
+  "Raw (unibyte) SSE bytes from the notification process, not yet framed.
+The `data:' payloads are decoded to `utf-8' only at the point of
+consumption, in `dsh-bridge--sse-parse'.  This variable is managed solely
+by `dsh-bridge--notifications-connect' and `dsh-bridge--notification-filter'.")
 
 (defvar dsh-bridge--notifications-receive-pending nil
   "Non-nil while a receive is already scheduled for a push notification.")
@@ -780,9 +785,13 @@ REST is the raw trailing text of an incomplete chunk."
 	(cons (apply #'concat (nreverse chunks)) rest)))
 
 (defun dsh-bridge--sse-parse (text)
-  "Parse accumulated SSE TEXT into (EVENTS . REST).
-EVENTS is a list of decoded `data:' payloads (alists); REST is the trailing
-text with no complete event terminator."
+  "Parse accumulated SSE byte stream TEXT into (EVENTS . REST).
+TEXT is raw bytes (a unibyte string).  In the return value, EVENTS is a
+list of decoded `data:' payloads (alists), and REST is the trailing bytes
+with no complete event terminator.  Framing is done on the raw bytes and
+each `data:' payload is decoded to `utf-8' only at the point of
+consumption, so a multibyte character split across chunk boundaries is
+never decoded prematurely."
   (let ((events nil)
 		(rest text))
 	(while (string-match "\\(?:\r?\n\\)\\{2\\}" rest)
@@ -790,55 +799,54 @@ text with no complete event terminator."
 		(setq rest (substring rest (match-end 0)))
 		(dolist (line (split-string chunk "\r?\n"))
 		  (when (string-prefix-p "data:" line)
-			(let ((json (condition-case nil
-							(json-parse-string (string-trim (substring line 5))
-											   :object-type 'alist
-											   :array-type 'list)
-						  (error nil))))
+			(let* ((payload (decode-coding-string
+							 (string-trim (substring line 5)) 'utf-8))
+				   (json (condition-case nil
+						   (json-parse-string payload
+											  :object-type 'alist
+											  :array-type 'list)
+						 (error nil))))
 			  (when json (push json events)))))))
 	(cons (nreverse events) rest)))
 
 (defun dsh-bridge--notification-handle-events (events)
-  "Dispatch decoded SSE EVENTS for the DSH bridge.
-`turn-start'/`turn-complete' update the status tracker, re-render the
-affected surfaces, and refresh the model cache (a turn boundary is when
-a web-UI model change takes effect); `turn-complete' also folds the frame's
-`time' into the session cache's `lastActive' so the sessions list's Age cell
-and row order stay live; `sessions-changed' debounces a
-sessions-list refetch; outbox notices are handled by the caller
-(`receive')."
+  "Dispatch decoded notification EVENTS received over the DSH bridge.
+Currently supported events are:
+- `turn-start': update status tracker, re-render, refresh model cache.
+- `turn-complete': same as (i), plus update session cache's `lastActive'
+  slot (see `dsh-bridge--sessions-cache').
+- `context': update `dsh-bridge--session-context' and re-render header
+  lines reporting that data.
+- `sessions-changed': update existing DSH-Sessions buffers."
   (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed"))
 				  events)
 	(dsh-bridge--notification-sessions-changed))
   (dolist (event events)
-	(let ((kind (alist-get 'kind event)))
+	(let ((kind (alist-get 'kind event))
+		  (id   (alist-get 'sessionId event)))
 	  (cond
 	   ((equal kind "turn-start")
-		(let ((id (alist-get 'sessionId event)))
-		  (when id
-			(dsh-bridge--status-set id 'running)
-			(dsh-bridge--status-event-render id)
-			(dsh-bridge--models-event-refresh id))))
+		(when id
+		  (dsh-bridge--status-set id 'running)
+		  (dsh-bridge--status-event-render id)
+		  (dsh-bridge--models-event-refresh id)))
 	   ((equal kind "turn-complete")
-		(let ((id (alist-get 'sessionId event))
-			  (reason (alist-get 'reason event)))
-		  (when id
-			(dsh-bridge--status-set id 'idle)
-			;; Fold the turn's timestamp into the session cache so the
-			;; sessions-list Age cell and row order stay live (F4).
-			(dsh-bridge--session-update-last-active id (alist-get 'time event))
-			(dsh-bridge--status-event-render id)
-			(dsh-bridge--models-event-refresh id)
-			(dsh-bridge--turn-complete-act id reason))))
+		(when id
+		  (dsh-bridge--status-set id 'idle)
+		  ;; Fold the turn's timestamp into the session cache.
+		  (dsh-bridge--session-update-last-active id (alist-get 'time event))
+		  (dsh-bridge--status-event-render id)
+		  (dsh-bridge--models-event-refresh id)
+		  (dsh-bridge--turn-complete-act id (alist-get 'reason event))))
 	   ((equal kind "context")
-		(let ((id (alist-get 'sessionId event))
-			  (used (alist-get 'usedTokens event))
+		(let ((used (alist-get 'usedTokens event))
 			  (window (alist-get 'contextWindow event)))
 		  (when (and id (numberp used) (numberp window))
 			(setq dsh-bridge--session-context
 				  (assoc-delete-all id dsh-bridge--session-context))
 			(push (cons id (cons used window)) dsh-bridge--session-context)
 			;; Redraw the prompt header's context segment in the same tick.
+			;; FIXME: limit to DSH-Prompt buffers
 			(force-mode-line-update t))))))))
 
 (defvar dsh-bridge--sessions-changed-timer nil
@@ -863,7 +871,7 @@ burst of frames (e.g., a rename) into one refresh."
   (funcall 'dsh-bridge-receive)) ; defined below
 
 (defun dsh-bridge--notification-filter (_proc string)
-  "Process filter for the SSE notification connection: decode and dispatch."
+  "Process filter for the DSH push notification network connection."
   (setq dsh-bridge--notifications-raw
 		(concat dsh-bridge--notifications-raw string))
   (unless dsh-bridge--notifications-headers-done
@@ -874,12 +882,11 @@ burst of frames (e.g., a rename) into one refresh."
 		(setq dsh-bridge--notifications-headers-done t))))
   (when dsh-bridge--notifications-headers-done
 	(let* ((decoded (dsh-bridge--chunked-decode dsh-bridge--notifications-raw))
-		   (body (decode-coding-string (car decoded) 'utf-8)))
+		   (body (car decoded)))
 	  (setq dsh-bridge--notifications-raw (cdr decoded))
 	  (unless (string-empty-p body)
-		(setq dsh-bridge--notifications-sse
-			  (concat dsh-bridge--notifications-sse body))
-		(let* ((parsed (dsh-bridge--sse-parse dsh-bridge--notifications-sse))
+		(let* ((sse-str (concat dsh-bridge--notifications-sse body))
+			   (parsed (dsh-bridge--sse-parse sse-str))
 			   (events (car parsed)))
 		  (setq dsh-bridge--notifications-sse (cdr parsed))
 		  (when events

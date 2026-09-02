@@ -2009,6 +2009,27 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
     (should (equal (car result) '(((kind . "draft")) ((kind . "outbox")))))
     (should (equal (cdr result) ""))))
 
+(ert-deftest dsh-bridge-sse-parse-utf8-straddle ()
+  "A `data:' payload whose UTF-8 character straddles a chunk boundary decodes.
+Framing is done on raw bytes, so a split character is never decoded
+prematurely; the payload is decoded only at the point of consumption."
+  (let* ((p1 (unibyte-string
+              #x64 #x61 #x74 #x61 #x3a #x20 #x7b #x22 #x6d #x73 #x67 #x22 #x3a #x22 #xC3)) ; ...\xC3
+         (p2 (unibyte-string #xA9 #x22 #x7d #x0a #x0a)))                       ; "\xA9\"}\n\n
+    ;; First read: payload is incomplete (no blank line), held back as raw bytes.
+    (let* ((init (dsh-bridge--sse-parse p1))
+           (acc (cdr init)))
+      (should (null (car init)))
+      (should (equal acc p1))
+      ;; Second read: concatenate the raw remainder with the new bytes, then frame.
+      (let* ((parsed (dsh-bridge--sse-parse (concat acc p2)))
+             (events (car parsed)))
+        (should (equal (length events) 1))
+        (let ((msg (alist-get 'msg (car events))))
+          (should (equal msg "é"))
+          (should (equal (encode-coding-string msg 'utf-8)
+                         (unibyte-string #xC3 #xA9))))))))
+
 (ert-deftest dsh-bridge-sse-decode-roundtrip ()
   "A full chunked SSE body decodes to an outbox notice."
   (let* ((payload "data: {\"kind\":\"outbox\"}\n\n")
@@ -2017,8 +2038,7 @@ must fall back to the loaded file and never call `file-name-directory' on nil."
                (concat (format "%x\r\n" size) payload "\r\n0\r\n\r\n")
                'utf-8)))
     (let* ((decoded (dsh-bridge--chunked-decode raw))
-           (parsed (dsh-bridge--sse-parse
-                    (decode-coding-string (car decoded) 'utf-8))))
+           (parsed (dsh-bridge--sse-parse (car decoded))))
       (should (equal (car parsed) '(((kind . "outbox"))))))))
 
 ;;; Turn notifications, session status, and the header line
