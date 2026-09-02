@@ -92,7 +92,7 @@ Bump all three at once.
 - Single-file package, `lexical-binding: t`, feature `dsh-bridge`. All symbols use the `dsh-bridge-` prefix; internal helpers use `dsh-bridge--`.
 - User-tunable behavior is a `defcustom` in the `dsh-bridge` group; do not hardcode what should be configurable.
 - HTTP uses `url-retrieve` + `json.el`; the bearer token is read from the token file. SSE notifications use `make-network-process` with chunked decoding and reconnect-with-retry; keep the latched start/stop (`dsh-bridge-notifications-start` / `dsh-bridge-notifications-stop`) semantics intact.
-- Buffer modes derive from `special-mode` (DSH-View), `tabulated-list-mode` (DSH-Sessions), and `markdown-mode` falling back to `text-mode` (DSH-Prompt). The dispatcher is a `transient-define-prefix`.
+- Buffer modes derive from `gfm-view-mode` falling back to `special-mode` (DSH-View), `tabulated-list-mode` (DSH-Sessions), and `markdown-mode` falling back to `text-mode` (DSH-Prompt). The fallbacks are chosen at load time via a conditional macro (`dsh-bridge--define-view-mode` / `dsh-bridge--define-prompt-mode`), driven by the `dsh-bridge-view-gfm` / `dsh-bridge-prompt-markdown` defcustoms. The dispatcher is a `transient-define-prefix`.
 - Requires Emacs 29.1+. Paths given to `dsh-bridge-dsh-command` are not tilde-expanded; document full paths.
 - ERT tests live in `emacs/dsh-bridge-tests.el` and run headless.
 

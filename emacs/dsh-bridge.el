@@ -121,11 +121,13 @@ Changing this option requires a reload to take effect."
   :group 'dsh-bridge)
 
 (defcustom dsh-bridge-view-gfm t
-  "Whether to font-lock DSH-View buffers as GitHub-Flavored Markdown.
-If non-nil and `markdown-mode' is installed, `dsh-bridge-view-mode'
-font-locks as GitHub-Flavored Markdown (GFM) with native code-block
-highlighting.  This affects font-locking only, and has no effect on the
-keybindings offered by `dsh-bridge-view-mode'."
+  "Whether DSH-View buffers are font-locked as GitHub-Flavored Markdown.
+If non-nil and `markdown-mode' is installed at load time,
+`dsh-bridge-view-mode' derives from `gfm-view-mode', so replies render as
+GitHub-Flavored Markdown with native code-block highlighting (and markdown's
+navigation keys become available); otherwise it derives from `special-mode' with
+no GFM rendering.  Changing this option requires reloading the package for it
+to take effect."
   :type 'boolean
   :group 'dsh-bridge)
 
@@ -1688,44 +1690,44 @@ while `M-p'/'M-n' walk the prompt history (see
 							(and context (concat " · " context))
 							sent))))
 
-(defvar dsh-bridge-view-mode-map)
-
-(defconst dsh-bridge--gfm-font-lock-defaults
-  '(markdown-mode-font-lock-keywords
-	nil nil nil nil
-	(font-lock-multiline . t)
-	(font-lock-syntactic-face-function . markdown-syntactic-face)
-	(font-lock-extra-managed-props
-	 . (composition display invisible rear-nonsticky
-					keymap help-echo mouse-face)))
-  "`font-lock-defaults' for the output buffer when markdown-mode is available.
-Mirrors markdown-mode's own setup (which sets it inline in `markdown-mode'
-rather than through a named variable); re-check on markdown-mode upgrades.")
-
-(defun dsh-bridge--view-enable-gfm-rendering ()
-  "Font-lock this buffer as GitHub-Flavored Markdown (rendering only).
-The view mode always bases its keymap on `special-mode' so the command surface
-is identical with and without markdown-mode; this only adds font-locking and
-native code-block highlighting."
-  (require 'markdown-mode)
-  (setq-local font-lock-defaults dsh-bridge--gfm-font-lock-defaults)
-  (setq-local markdown-fontify-code-blocks-natively t))
-
-(define-derived-mode dsh-bridge-view-mode special-mode "DSH-View"
-  "Major mode for `*dsh-bridge-output*'.
-Read-only.	Keys: `g' refresh (re-fetch the shown session's latest reply),
+(defmacro dsh-bridge--define-view-mode (parent)
+  "Define `dsh-bridge-view-mode' as a variant of PARENT.
+PARENT is `gfm-view-mode' (GFM rendering when markdown-mode is installed) or
+`special-mode' (the fallback when it is absent).  A conditional expression
+cannot go directly in the parent slot of `define-derived-mode' — the macro
+quotes it into the mode metadata and the docstring generation calls
+`symbol-name' on it — so the choice is resolved here, driven by
+`dsh-bridge-view-gfm' and `(require \='markdown-mode nil t)'."
+  `(define-derived-mode dsh-bridge-view-mode ,parent "DSH-View"
+	 "Major mode for `*dsh-bridge-output*'.
+Read-only.  Keys: `g' refresh (re-fetch the shown session's latest reply),
 `r' reply (bind the prompt buffer to the shown session, without changing the
 default target), `w' copy, `i' receive (pull the latest \"Send to Emacs\"
 message), `l' list sessions, `q' dismiss.  `M-p'/`M-n' cycle the shown
 session's assistant replies (older / newer; the header shows the position
 `k/n').	 `g' is the output buffer's fetch: `f' elsewhere produces a reply
-into this buffer, so inside it the two coincide.  The keymap is identical
-with and without markdown-mode; when markdown-mode is installed and
-`dsh-bridge-view-gfm' is non-nil, replies are additionally font-locked as
-GitHub-Flavored Markdown with native code-block highlighting."
-  (setq buffer-read-only t)
-  (when (and dsh-bridge-view-gfm (require 'markdown-mode nil t))
-	(dsh-bridge--view-enable-gfm-rendering)))
+into this buffer, so inside it the two coincide.
+
+When markdown-mode is installed and `dsh-bridge-view-gfm' is non-nil, the mode
+derives from `gfm-view-mode', so replies are font-locked as GitHub-Flavored
+Markdown with native code-block highlighting and markdown's own navigation keys
+are inherited.  Otherwise it derives from `special-mode' and no GFM font-locking
+is applied."
+	 (setq buffer-read-only t)))
+
+;; The mode map is created by whichever branch of the `if' runs; declare it here
+;; so the byte-compiler knows the `define-key' forms below are valid.
+(defvar dsh-bridge-view-mode-map)
+
+;; The mode and its `gfm-view-mode' parent are chosen at load time, so the
+;; byte-compiler cannot see them through the conditional macro expansion;
+;; declare them (mirroring the prompt mode) to keep the compile clean.
+(declare-function dsh-bridge-view-mode "dsh-bridge")
+(declare-function gfm-view-mode "markdown-mode")
+
+(if (and dsh-bridge-view-gfm (require 'markdown-mode nil t))
+	(dsh-bridge--define-view-mode gfm-view-mode)
+  (dsh-bridge--define-view-mode special-mode))
 
 (define-key dsh-bridge-view-mode-map (kbd "g") #'revert-buffer)
 (define-key dsh-bridge-view-mode-map (kbd "q") #'quit-window)
@@ -2347,11 +2349,21 @@ shown in another window so the output stays visible."
 	(message "dsh-bridge: no reply shown to reply to")))
 
 (defun dsh-bridge-copy-reply ()
-  "Copy the reply in `*dsh-bridge-output*' (region, else the whole buffer)."
+  "Copy the reply in `*dsh-bridge-output*' (region, else the whole buffer).
+The kill carries the original Markdown source: under `gfm-view-mode', markup
+delimiters are hidden from display and `filter-buffer-substring-function'
+would strip them from a copy, so this copies the raw text instead."
   (interactive)
-  (if (use-region-p)
-	  (copy-region-as-kill (region-beginning) (region-end))
-	(copy-region-as-kill (point-min) (point-max)))
+  (let* ((region-p (use-region-p))
+		 (beg (if region-p (region-beginning) (point-min)))
+		 (end (if region-p (region-end) (point-max)))
+		 ;; Bypass `filter-buffer-substring-function' so the kill is the
+		 ;; raw Markdown, not the rendered text.
+		 (str (buffer-substring beg end)))
+	(if (eq last-command 'kill-region)
+		(kill-append str (< end beg))
+	  (kill-new str)))
+  (setq deactivate-mark t)
   (message "dsh-bridge: copied reply"))
 
 ;;; The prompt buffer

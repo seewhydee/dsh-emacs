@@ -725,21 +725,28 @@ compose/fetch/targeting verbs."
                     (cadr (assoc key dsh-bridge--verb-suffixes))))))
 
 (ert-deftest dsh-bridge-view-mode-gfm ()
-  "When markdown-mode is loadable, the view mode font-locks GFM without
-inheriting markdown's keymap."
+  "When markdown-mode is loadable, the view mode derives from gfm-view-mode for
+GFM rendering (read-only, native code-block font-locking); the bridge's own
+keys win over the inherited markdown view map, which also contributes bare
+outline navigation (p/n/f/b/u)."
   (when (require 'markdown-mode nil t)
     (with-temp-buffer
       (insert "# Heading\n")
       (dsh-bridge-view-mode)
-      (should (derived-mode-p 'special-mode))
+      (should (derived-mode-p 'gfm-mode))
       (should font-lock-defaults)
       (should markdown-fontify-code-blocks-natively)
       (should buffer-read-only)
-      ;; Markdown's outline keys must not leak into the view keymap.
-      (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd "p"))
-                      #'markdown-outline-previous))
-      (should-not (eq (lookup-key dsh-bridge-view-mode-map (kbd "n"))
-                      #'markdown-outline-next)))))
+      ;; Effective bindings: the bridge's keys override the inherited
+      ;; gfm-view-mode chain (which binds q to `kill-this-buffer' and
+      ;; M-n/M-p to link navigation).
+      (should (eq (key-binding (kbd "M-p")) #'dsh-bridge-view-previous-reply))
+      (should (eq (key-binding (kbd "M-n")) #'dsh-bridge-view-next-reply))
+      (should (eq (key-binding (kbd "g")) #'revert-buffer))
+      (should (eq (key-binding (kbd "q")) #'quit-window))
+      ;; gfm-view-mode's own map contributes bare outline navigation.
+      (should (eq (key-binding (kbd "p")) #'markdown-outline-previous))
+      (should (eq (key-binding (kbd "n")) #'markdown-outline-next)))))
 
 (ert-deftest dsh-bridge-reply-binds-shown-session ()
   "`dsh-bridge-reply' in the output buffer binds the prompt to the shown
@@ -804,11 +811,24 @@ attempt."
     (insert "the reply")
     (dsh-bridge-view-mode)
     (setq-local dsh-bridge--view-content-session "s1")
-    (let ((killed nil))
-      (cl-letf (((symbol-function 'copy-region-as-kill)
-                 (lambda (beg end) (setq killed (buffer-substring beg end)))))
-        (dsh-bridge-copy-reply))
-      (should (equal killed "the reply")))))
+    (dsh-bridge-copy-reply)
+    (should (equal (current-kill 0) "the reply"))))
+
+(ert-deftest dsh-bridge-copy-reply-raw-markdown ()
+  "`dsh-bridge-copy-reply' copies the original Markdown source, not the
+rendered text, when the view buffer derives from `gfm-view-mode' (which hides
+markup and installs `filter-buffer-substring-function')."
+  (when (require 'markdown-mode nil t)
+    (with-temp-buffer
+      (insert "# Title\n\nSome **bold** text.\n")
+      (dsh-bridge-view-mode)
+      (when (derived-mode-p 'gfm-mode)
+        (font-lock-ensure)
+        ;; Sanity: markup hiding really is in effect.
+        (should (text-property-any (point-min) (point-max)
+                                   'invisible 'markdown-markup))
+        (dsh-bridge-copy-reply)
+        (should (equal (current-kill 0) "# Title\n\nSome **bold** text.\n"))))))
 
 ;;; Receive (the DSH→Emacs push; the outbox is invisible transport)
 
