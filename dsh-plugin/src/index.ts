@@ -52,6 +52,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { Outbox } from './outbox.ts'
 import {
+  assistantMessageHasText,
   assistantReplies,
   classifySessionId,
   contextMessage,
@@ -65,6 +66,7 @@ import {
   outboxMessage,
   outboxSessionId,
   parseBearerAuthorization,
+  repliesChangedMessage,
   resolveTargetId,
   rpcRequestFrame,
   rpcUnwrapResponse,
@@ -78,6 +80,7 @@ import {
   workspaceRefsBySession,
   workspaceTitleConflict,
   type LiveSessionLike,
+  type MessageBlockLike,
   type ResolveTargetResult,
   type SessionEventLike,
   type SessionHeaderLike,
@@ -589,6 +592,14 @@ export function apply(ctx: Context): void {
       const data = event.data as { reason?: unknown } | undefined
       const reason = data?.reason as { kind?: unknown } | undefined
       broadcast(turnCompleteMessage(id, typeof reason?.kind === 'string' ? reason.kind : 'unrecognized', event.time))
+      return
+    }
+    if (event.type === 'assistant/message') {
+      // A reply is committed mid-turn. Nudge Emacs to refresh its reply list
+      // (and the View (k/n) counter) while the turn is still running; gate on
+      // text so tool-call-only steps do not fire a spurious refresh.
+      const data = event.data as { message?: { content?: readonly MessageBlockLike[] } } | undefined
+      if (assistantMessageHasText(data?.message)) broadcast(repliesChangedMessage(id))
       return
     }
     if (event.type === 'session/title') {

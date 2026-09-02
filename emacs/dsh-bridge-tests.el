@@ -2307,6 +2307,73 @@ uncached sessions alone.  `run-at-time' is stubbed to run immediately."
          ((kind . "turn-complete") (sessionId . "s2"))))
       (should (equal refetched '(("s1" . t) ("s1" . t)))))))
 
+(ert-deftest dsh-bridge-notification-turn-start-refreshes-replies ()
+  "A turn-start frame schedules a reply-cache refresh so the View `(k/n)'
+counter tracks the live reply list during a turn, not only after it completes."
+  (let ((dsh-bridge--session-status nil)
+        (refreshed nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest args) (apply fn args)))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore)
+              ((symbol-function 'dsh-bridge--models-event-refresh) #'ignore)
+              ((symbol-function 'dsh-bridge--view-replies-cache-refresh)
+               (lambda (id) (push id refreshed))))
+      (dsh-bridge--notification-handle-events
+       '(((kind . "turn-start") (sessionId . "s1"))))
+      (should (equal refreshed '("s1"))))))
+
+(ert-deftest dsh-bridge-notification-replies-changed-refreshes ()
+  "A replies-changed frame schedules a reply-cache refresh for the session."
+  (let ((refreshed nil))
+    (cl-letf (((symbol-function 'run-at-time)
+               (lambda (_time _repeat fn &rest args) (apply fn args)))
+              ((symbol-function 'dsh-bridge--view-replies-cache-refresh)
+               (lambda (id) (push id refreshed))))
+      (dsh-bridge--notification-handle-events
+       '(((kind . "replies-changed") (sessionId . "s1"))))
+      (should (equal refreshed '("s1"))))))
+
+(ert-deftest dsh-bridge-status-reprint-row-repaints-cell ()
+  "Reprinting a sessions-list row repaints a changed status cell in place."
+  (when (get-buffer "*dsh-bridge-sessions*")
+    (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((dsh-bridge-status-indicator 'geometric)
+        (dsh-bridge--sessions-cache
+         '(((id . "s1") (live . t) (running . nil) (lastActive . 0))))
+        (dsh-bridge--session-status nil))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
+      (dsh-bridge-sessions-mode)
+      (setq tabulated-list-format (dsh-bridge--sessions-format))
+      (setq tabulated-list-sort-key '("Age" . t))
+      (setq tabulated-list-entries (dsh-bridge--sessions-entries))
+      (tabulated-list-init-header)
+      (tabulated-list-print t)
+      (should (string-match-p "●" (buffer-string)))
+      (dsh-bridge--status-set "s1" 'running)
+      (dsh-bridge--status-reprint-row "s1")
+      (should (string-match-p "■" (buffer-string)))
+      (should-not (string-match-p "●" (buffer-string))))
+    (kill-buffer "*dsh-bridge-sessions*")))
+
+(ert-deftest dsh-bridge-view-next-reply-stale-anchor-stays ()
+  "M-n at the newest stays at the newest when the anchor is no longer the
+newest reply (new replies arrived mid-walk), instead of jumping back to it."
+  (let ((dsh-bridge--replies-cache '(("s1" "newest2" "newest" "older")))
+        (msg nil))
+    (with-temp-buffer
+      (insert "newest2")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (setq-local dsh-bridge--view-replies-session "s1")
+      (setq-local dsh-bridge--view-replies-index 0)
+      (setq-local dsh-bridge--view-replies-anchor "newest")
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (setq msg (apply #'format args)))))
+        (dsh-bridge-view-next-reply))
+      (should (equal (buffer-string) "newest2"))
+      (should (eq dsh-bridge--view-replies-index 0))
+      (should (string-match-p "no newer replies" msg)))))
+
 (ert-deftest dsh-bridge-view-replies-cache-refresh-shifts-index ()
   "A turn-complete cache refresh keeps a cycling view's index aligned with the
 newest-first list, so the `(k/n)' counter stays honest."

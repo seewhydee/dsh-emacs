@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  assistantMessageHasText,
   assistantReplies,
   classifySessionId,
   contextMessage,
@@ -16,6 +17,7 @@ import {
   outboxMessage,
   outboxSessionId,
   parseBearerAuthorization,
+  repliesChangedMessage,
   resolveTargetId,
   rpcRequestFrame,
   rpcUnwrapResponse,
@@ -137,6 +139,16 @@ describe('assistantReplies', () => {
   it('drops whitespace-only replies and returns an empty list with no messages', () => {
     expect(assistantReplies([message('assistant', [{ type: 'text', text: '   ' }])])).toEqual([])
     expect(assistantReplies([])).toEqual([])
+  })
+})
+
+describe('assistantMessageHasText', () => {
+  it('is true only for a message with a non-whitespace text block', () => {
+    expect(assistantMessageHasText({ content: [{ type: 'text', text: 'hello' }] })).toBe(true)
+    expect(assistantMessageHasText({ content: [{ type: 'text', text: '   ' }] })).toBe(false)
+    expect(assistantMessageHasText({ content: [{ type: 'tool-call' }] })).toBe(false)
+    expect(assistantMessageHasText({ content: [] })).toBe(false)
+    expect(assistantMessageHasText(undefined)).toBe(false)
   })
 })
 
@@ -475,6 +487,14 @@ describe('turnCompleteMessage', () => {
   it('emits one SSE data frame carrying the turn-end reason kind and event time', () => {
     expect(turnCompleteMessage('session-1', 'completed', 1234)).toBe(
       'data: {"kind":"turn-complete","sessionId":"session-1","reason":"completed","time":1234}\n\n',
+    )
+  })
+})
+
+describe('repliesChangedMessage', () => {
+  it('emits one SSE data frame carrying the session id', () => {
+    expect(repliesChangedMessage('session-1')).toBe(
+      'data: {"kind":"replies-changed","sessionId":"session-1"}\n\n',
     )
   })
 })

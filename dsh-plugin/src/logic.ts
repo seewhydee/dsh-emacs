@@ -88,6 +88,16 @@ export function assistantReplies(messages: readonly MessageLike[]): string[] {
 }
 
 /**
+ * Whether an assistant message carries non-empty text, i.e. whether it counts
+ * as a reply in `assistantReplies`. A tool-call-only step (content without a
+ * text block) does not. Used to gate the `replies-changed` SSE frame so it
+ * fires only when the reply list actually grows.
+ */
+export function assistantMessageHasText(message: { content?: readonly MessageBlockLike[] } | undefined): boolean {
+  return message?.content?.some(block => block.type === 'text' && (block.text ?? '').trim() !== '') ?? false
+}
+
+/**
  * Minimal structural face of one logged event, enough to fold a title and
  * last-activity time. `data` is deliberately `unknown`: the real `SessionEvent`
  * union satisfies this shape, and the title fold narrows the payload it reads.
@@ -445,6 +455,18 @@ export function turnStartMessage(sessionId: string, time: number): string {
  */
 export function turnCompleteMessage(sessionId: string, reason: string, time: number): string {
   return `data: ${JSON.stringify({ kind: 'turn-complete', sessionId, reason, time })}\n\n`
+}
+
+/**
+ * One SSE `data:` frame announcing that a session's assistant reply list grew
+ * (an `assistant/message` surface event carrying non-empty text was committed
+ * mid-turn). Unlike the turn-boundary frames, this fires once per reply a
+ * multi-step turn produces, so Emacs can refresh its reply list — and the View
+ * `(k/n)` counter — while the turn is still running. A bare nudge: the consumer
+ * re-pulls `GET /replies`; the browser ignores the non-`draft` kind.
+ */
+export function repliesChangedMessage(sessionId: string): string {
+  return `data: ${JSON.stringify({ kind: 'replies-changed', sessionId })}\n\n`
 }
 
 /**

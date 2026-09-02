@@ -812,9 +812,12 @@ never decoded prematurely."
 (defun dsh-bridge--notification-handle-events (events)
   "Dispatch decoded notification EVENTS received over the DSH bridge.
 Currently supported events are:
-- `turn-start': update status tracker, re-render, refresh model cache.
+- `turn-start': update status tracker, re-render, refresh model and reply
+  caches (the reply refresh keeps the View `(k/n)' counter live during a turn).
 - `turn-complete': same as (i), plus update session cache's `lastActive'
   slot (see `dsh-bridge--sessions-cache').
+- `replies-changed': refresh the reply cache (an assistant reply was
+  committed mid-turn).
 - `context': update `dsh-bridge--session-context' and re-render header
   lines reporting that data.
 - `sessions-changed': update existing DSH-Sessions buffers."
@@ -829,7 +832,12 @@ Currently supported events are:
 		(when id
 		  (dsh-bridge--status-set id 'running)
 		  (dsh-bridge--status-event-render id)
-		  (dsh-bridge--models-event-refresh id)))
+		  (dsh-bridge--models-event-refresh id)
+		  ;; A turn boundary is also when the reply list grows: refresh it now
+		  ;; so the View `(k/n)' counter tracks the live list during the turn,
+		  ;; not only after it completes.  Deferred like the turn-complete
+		  ;; refresh, to keep the SSE process filter non-blocking.
+		  (run-at-time 0 nil #'dsh-bridge--view-replies-cache-refresh id)))
 	   ((equal kind "turn-complete")
 		(when id
 		  (dsh-bridge--status-set id 'idle)
@@ -838,6 +846,9 @@ Currently supported events are:
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
 		  (dsh-bridge--turn-complete-act id (alist-get 'reason event))))
+	   ((equal kind "replies-changed")
+		(when id
+		  (run-at-time 0 nil #'dsh-bridge--view-replies-cache-refresh id)))
 	   ((equal kind "context")
 		(let ((used (alist-get 'usedTokens event))
 			  (window (alist-get 'contextWindow event)))
@@ -1886,18 +1897,25 @@ the newest (or is not a known reply), report \"no newer replies\"."
 		  (dsh-bridge--view-show-reply (1- k) replies)))))))
 
 (defun dsh-bridge-view-next-reply ()
-  "Show the next (newer) assistant reply; at the newest, restore the anchor."
+  "Show the next (newer) assistant reply; at the newest, restore the anchor.
+Restoring the anchor only returns to the reply the buffer was filled with when
+that reply is still the newest; once newer replies have arrived mid-walk the
+anchor is an older reply, and \"restoring\" it would jump the view backward, so
+M-n instead stays at the newest and reports \"no newer replies\"."
   (interactive)
   (if (null dsh-bridge--view-replies-index)
 	  (dsh-bridge--view-next-reply-from-rest)
 	(if (zerop dsh-bridge--view-replies-index)
-		(progn
-		  (setq-local dsh-bridge--view-replies-index nil)
-		  (let ((inhibit-read-only t))
-			(erase-buffer)
-			(insert (or dsh-bridge--view-replies-anchor ""))
-			(goto-char (point-min)))
-		  (setq header-line-format (dsh-bridge--view-header-line)))
+		(if (and dsh-bridge--view-replies-anchor
+				 (not (equal dsh-bridge--view-replies-anchor (buffer-string))))
+			(message "dsh-bridge: no newer replies")
+		  (progn
+			(setq-local dsh-bridge--view-replies-index nil)
+			(let ((inhibit-read-only t))
+			  (erase-buffer)
+			  (insert (or dsh-bridge--view-replies-anchor ""))
+			  (goto-char (point-min)))
+			(setq header-line-format (dsh-bridge--view-header-line))))
 	  (let ((replies (dsh-bridge--view-replies-refresh)))
 		(when replies
 		  (dsh-bridge--view-show-reply
@@ -3035,14 +3053,17 @@ paint lands in the same tick as the other surfaces."
 Updates that row's entry in `tabulated-list-entries' and re-displays without
 re-fetching (the sessions buffer would otherwise stay stale until `g').  The
 print re-sorts by the active `Age' key (so a just-updated timestamp moves the
-row) and passes REMEMBER-POS so point follows the session id when it does."
+row) and passes REMEMBER-POS so point follows the session id when it does.
+The full (non-UPDATE) print is deliberate: `tabulated-list-print''s UPDATE
+path skips re-rendering a row whose id is already in place, so a changed
+status/age cell on a row that does not move would otherwise never repaint."
   (let* ((session (dsh-bridge--session-for-id session-id))
 		 (idx (seq-position tabulated-list-entries session-id
 							(lambda (entry id) (equal (car entry) id)))))
 	(when (and session idx)
 	  (setf (nth idx tabulated-list-entries)
 			(dsh-bridge--session-entry session))
-	  (tabulated-list-print t t))))
+	  (tabulated-list-print t))))
 
 (defun dsh-bridge--view-shown-session-p (session-id)
   "Whether *dsh-bridge-output* is live, in view mode, and shows SESSION-ID."
