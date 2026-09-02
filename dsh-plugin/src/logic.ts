@@ -549,3 +549,118 @@ export function contextUsedTokens(
 export function contextMessage(sessionId: string, usedTokens: number, contextWindow: number): string {
   return `data: ${JSON.stringify({ kind: 'context', sessionId, usedTokens, contextWindow })}\n\n`
 }
+
+/**
+ * Minimal structural face of one `ask_user_question` item, enough to rebroadcast
+ * it to Emacs. Mirrors `@deepseek-ai/dsh-user-questions`'s wire type, which the
+ * mux carries verbatim; `intent` is only present for a plan-review decision.
+ */
+export interface AskUserQuestionOptionLike {
+  label: string
+  description?: string
+}
+
+export interface AskUserQuestionItemLike {
+  id: string
+  question: string
+  detail?: string
+  header?: string
+  options?: readonly AskUserQuestionOptionLike[]
+  multiSelect?: boolean
+  intent?: { kind: 'plan-review'; approve: string }
+}
+
+/** One answer the human returns for a question. */
+export interface AskUserAnswerItemLike {
+  id: string
+  selected: readonly string[]
+  custom?: string
+}
+
+/** The payload of a mux `question/requested` frame. */
+export interface AskUserPayload {
+  sessionId: string
+  questions: readonly AskUserQuestionItemLike[]
+}
+
+/** The payload of a mux `question/resolved` frame. */
+export interface AskUserResolvedPayload {
+  sessionId: string
+  questionRpcId: string
+  outcome: 'answered' | 'cancelled'
+}
+
+/** Narrow a mux frame payload to `question/requested`, or null. */
+export function questionRequestedPayload(payload: unknown): AskUserPayload | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const value = payload as { type?: unknown; sessionId?: unknown; questions?: unknown }
+  if (value.type !== 'question/requested') return null
+  if (typeof value.sessionId !== 'string') return null
+  if (!Array.isArray(value.questions) || value.questions.length === 0) return null
+  for (const q of value.questions) {
+    if (typeof q !== 'object' || q === null) return null
+    const item = q as { id?: unknown; question?: unknown }
+    if (typeof item.id !== 'string' || typeof item.question !== 'string') return null
+  }
+  return {
+    sessionId: value.sessionId,
+    questions: value.questions as readonly AskUserQuestionItemLike[],
+  }
+}
+
+/** Narrow a mux frame payload to `question/resolved`, or null. */
+export function questionResolvedPayload(payload: unknown): AskUserResolvedPayload | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const value = payload as { type?: unknown; sessionId?: unknown; questionRpcId?: unknown; outcome?: unknown }
+  if (value.type !== 'question/resolved') return null
+  if (typeof value.sessionId !== 'string') return null
+  if (typeof value.questionRpcId !== 'string') return null
+  if (value.outcome !== 'answered' && value.outcome !== 'cancelled') return null
+  return { sessionId: value.sessionId, questionRpcId: value.questionRpcId, outcome: value.outcome }
+}
+
+/** One SSE `data:` frame announcing a pending question to Emacs. */
+export function askUserMessage(
+  questionId: string,
+  sessionId: string,
+  questions: readonly AskUserQuestionItemLike[],
+): string {
+  return `data: ${JSON.stringify({ kind: 'ask-user', questionId, sessionId, questions })}\n\n`
+}
+
+/** One SSE `data:` frame telling Emacs a question was resolved (answered/cancelled). */
+export function askUserResolvedMessage(
+  sessionId: string,
+  questionId: string,
+  outcome: 'answered' | 'cancelled',
+): string {
+  return `data: ${JSON.stringify({ kind: 'ask-user-resolved', sessionId, questionId, outcome })}\n\n`
+}
+
+/** The wire envelope `apiProxy.respond` consumes to settle a pending question. */
+export interface QuestionAnswerEnvelope {
+  rpcId: string
+  result:
+    | { ok: true; value: { sessionId: string; answer: { answers: readonly AskUserAnswerItemLike[] } } }
+    | { ok: false; error: { code: 'cancelled'; message: string } }
+}
+
+/** Build the respond envelope that resolves a pending question with ANSWERS. */
+export function questionAnswerEnvelope(
+  questionId: string,
+  sessionId: string,
+  answers: readonly AskUserAnswerItemLike[],
+): QuestionAnswerEnvelope {
+  return {
+    rpcId: questionId,
+    result: { ok: true, value: { sessionId, answer: { answers } } },
+  }
+}
+
+/** Build the respond envelope that cancels a pending question. */
+export function questionCancelEnvelope(questionId: string): QuestionAnswerEnvelope {
+  return {
+    rpcId: questionId,
+    result: { ok: false, error: { code: 'cancelled', message: 'the user cancelled ask_user_question' } },
+  }
+}

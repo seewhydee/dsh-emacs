@@ -224,6 +224,35 @@ specific assistant messages to Emacs.  This automatically pops to the
 DSH-View buffer in Emacs.  You can use `i` in the DSH-View buffer (or
 run `M-x dsh-bridge-receive`) to pull the last message pushed.
 
+### Answering ask-user questions
+
+When the model pauses to ask you something (`ask_user_question`), the
+bridge surfaces it in Emacs.  The session's status glyph becomes an
+awaiting marker (`⏳`), the DSH-View header spells out "awaiting your
+answer", and the echo area announces the question.  The session stays
+`running` host-side (its turn is parked inside the tool call), so you
+must answer before it continues.
+
+* `a` — in the DSH-View or DSH-Sessions buffer, open the pending
+  question buffer for the shown / point session.
+* In a `*dsh-bridge-question: <Label>*` buffer, mark the option(s) you
+  choose with `RET` or the option's number key (radio behavior for
+  single-select questions, checkbox for multi-select); each question also
+  has a `c` row for typing a custom answer.  `C-c C-s` skips the question
+  at point (answered with an empty selection), `TAB` moves between
+  questions, `C-c C-c` submits, and `C-c C-k` declines (cancels the
+  `ask_user_question` tool call).  `q` buries without answering — the
+  question stays pending and `a` reopens the buffer with your marks
+  intact.  A plan-review question renders the plan itself (the item's
+  `detail`) above its options.
+
+A question buffer is read-only until you answer; it names the session in
+its buffer-name and hides a resolved question behind a banner.  `a` (or
+`dsh-bridge-answer`) answers a session with a live pending ask; if you
+would rather have questions pop automatically, set
+`dsh-bridge-question-auto-pop` (default nil, since auto-popping is
+intrusive).
+
 ## Permissions, authentication, and failure bounds
 
 The DSH plugin registers its routes on the DSH web server's loopback
@@ -234,6 +263,13 @@ Every `/dsh-bridge` route requires a shared bearer token stored at
 `~/.dsh/dsh-bridge-token`, generated on first use in mode 0600.  Emacs
 reads this file directly, while the browser plugin fetches it from the
 loopback-only `GET /dsh-bridge/token` route (peer- and origin-fenced).
+
+The ask-user path also subscribes to the host's in-process `apiProxy`
+mux stream (`apiProxy.events.mux`) and settles questions via
+`apiProxy.respond` — both loopback/in-process, no third-party contact,
+and the Emacs answer arrives over the bearer-authed `POST
+/dsh-bridge/answer` route.  A late or duplicate answer gets
+`accepted: false` (benign), the web UI and Emacs answer first-wins.
 
 HTTP request bodies are capped at 1 MiB; larger bodies get a 413
 error.  DSH-to-Emacs messages are held in a bounded outbox (100

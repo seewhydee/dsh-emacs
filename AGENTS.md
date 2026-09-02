@@ -85,7 +85,7 @@ Bump all three at once.
 ### Build and restart discipline
 
 - `cordis.patch.yml` edits and client-bundle changes hot-reload; host plugin code and `package.json` (manifest) changes require a `dsh web` restart.
-- The harness is pre-release with no compatibility promise (see `peerDependencies` in `dsh-plugin/package.json` for the pinned range). On any version bump, re-verify the Cordis service seams and the client-bundle artifact contract.
+- The harness is pre-release with no compatibility promise (see `peerDependencies` in `dsh-plugin/package.json` for the pinned range). On any version bump, re-verify the Cordis service seams, the client-bundle artifact contract, and the ask-user host coupling: the in-process `apiProxy.events.mux` stream frames (`question/requested` / `question/resolved`) and the `apiProxy.respond` envelope it settles. The mux is WebSocket-served over HTTP (a plain `GET /api/events.mux` returns 426), so the bridge consumes it in-process via `ctx.get('apiProxy')`, never over a loopback WebSocket client.
 
 ### Emacs package (`emacs/dsh-bridge.el`)
 

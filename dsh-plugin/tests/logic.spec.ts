@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  askUserMessage,
+  askUserResolvedMessage,
   assistantMessageHasText,
   assistantReplies,
   classifySessionId,
@@ -17,6 +19,10 @@ import {
   outboxMessage,
   outboxSessionId,
   parseBearerAuthorization,
+  questionAnswerEnvelope,
+  questionCancelEnvelope,
+  questionRequestedPayload,
+  questionResolvedPayload,
   repliesChangedMessage,
   resolveTargetId,
   rpcRequestFrame,
@@ -555,5 +561,49 @@ describe('contextMessage', () => {
     expect(contextMessage('session-1', 45000, 100000)).toBe(
       'data: {"kind":"context","sessionId":"session-1","usedTokens":45000,"contextWindow":100000}\n\n',
     )
+  })
+})
+
+describe('ask-user frame construction and mux narrowing', () => {
+  it('askUserMessage emits one SSE data frame with the question id and payload', () => {
+    expect(askUserMessage('rpc-1', 'session-1', [{ id: 'q1', question: 'Go?', options: [{ label: 'Yes' }] }]))
+      .toBe('data: {"kind":"ask-user","questionId":"rpc-1","sessionId":"session-1","questions":[{"id":"q1","question":"Go?","options":[{"label":"Yes"}]}]}\n\n')
+  })
+
+  it('askUserResolvedMessage emits the outcome frame', () => {
+    expect(askUserResolvedMessage('session-1', 'rpc-1', 'answered')).toBe(
+      'data: {"kind":"ask-user-resolved","sessionId":"session-1","questionId":"rpc-1","outcome":"answered"}\n\n')
+    expect(askUserResolvedMessage('session-1', 'rpc-1', 'cancelled')).toBe(
+      'data: {"kind":"ask-user-resolved","sessionId":"session-1","questionId":"rpc-1","outcome":"cancelled"}\n\n')
+  })
+
+  it('narrows a mux question/requested payload', () => {
+    expect(questionRequestedPayload({
+      type: 'question/requested', sessionId: 's1', questions: [{ id: 'q1', question: 'go?' }],
+    })).toEqual({ sessionId: 's1', questions: [{ id: 'q1', question: 'go?' }] })
+  })
+
+  it('rejects a malformed or non-question payload', () => {
+    expect(questionRequestedPayload(null)).toBeNull()
+    expect(questionRequestedPayload({ type: 'nope' })).toBeNull()
+    expect(questionRequestedPayload({ type: 'question/requested', sessionId: 's1', questions: [] })).toBeNull()
+    expect(questionRequestedPayload({ type: 'question/requested', sessionId: 's1', questions: [{ question: 'no id' }] })).toBeNull()
+  })
+
+  it('narrows a mux question/resolved payload', () => {
+    expect(questionResolvedPayload({ type: 'question/resolved', sessionId: 's1', questionRpcId: 'rpc-1', outcome: 'answered' }))
+      .toEqual({ sessionId: 's1', questionRpcId: 'rpc-1', outcome: 'answered' })
+    expect(questionResolvedPayload({ type: 'question/resolved', sessionId: 's1', questionRpcId: 'rpc-1', outcome: 'bad' })).toBeNull()
+  })
+
+  it('builds the respond envelope that resolves and the one that cancels', () => {
+    expect(questionAnswerEnvelope('rpc-1', 's1', [{ id: 'q1', selected: ['Yes'] }])).toEqual({
+      rpcId: 'rpc-1',
+      result: { ok: true, value: { sessionId: 's1', answer: { answers: [{ id: 'q1', selected: ['Yes'] }] } } },
+    })
+    expect(questionCancelEnvelope('rpc-1')).toEqual({
+      rpcId: 'rpc-1',
+      result: { ok: false, error: { code: 'cancelled', message: 'the user cancelled ask_user_question' } },
+    })
   })
 })

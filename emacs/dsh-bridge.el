@@ -16,7 +16,7 @@
 ;; along with this program.	 If not, see <https://www.gnu.org/licenses/>.
 
 ;; Author: Chong Yidong <cyd@stupidchicken.com>
-;; Version: 0.4.0
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: tools, convenience
 
@@ -67,8 +67,9 @@
 (require 'seq)
 (require 'json)
 (require 'transient)
+(require 'cl-lib)
 
-(defconst dsh-bridge-version "0.4.0"
+(defconst dsh-bridge-version "0.5.0"
   "Version string for the DSH-Bridge package.
 This should match the version reported by the running DSH plugin.")
 
@@ -297,6 +298,12 @@ selection is the single source of truth, refreshed on prompt open, on `C-c
 C-s' rebind, on turn SSE frames, and after a successful
 `dsh-bridge-select-model'.")
 
+(defvar dsh-bridge--pending-questions nil
+  "Alist of (SESSION-ID . ((QUESTION-ID . QUESTIONS) ...)) live ask-user asks.
+Maintained by the `ask-user' / `ask-user-resolved' SSE frames, and cleared
+defensively on `turn-complete'.  A session pauses its turn inside the
+`ask_user_question' tool call, so a pending ask is a real `awaiting' state.")
+
 (defvar dsh-bridge--session-context nil
   "Alist of (SESSION-ID . (USED-TOKENS . CONTEXT-WINDOW)) context occupancy.
 Folded from the host's `context' SSE frames and seeded from
@@ -342,22 +349,40 @@ on `unknown'.  No active retrieval is done.  The status tracker entry is
         (and row (if (alist-get 'running row) 'running 'idle))
         'unknown)))
 
+(defun dsh-bridge--session-awaiting-p (session-id)
+  "Whether SESSION-ID has a live ask-user question pending."
+  (and session-id (assoc session-id dsh-bridge--pending-questions)))
+
+(defun dsh-bridge--pending-question (session-id)
+  "The (QUESTION-ID . QUESTIONS) entry for SESSION-ID's pending ask, or nil."
+  (let ((entry (and session-id (assoc session-id dsh-bridge--pending-questions))))
+	(and entry (car (cdr entry)))))
+
 (defun dsh-bridge--status-glyph (session-id)
   "Return a status indicator for SESSION-ID as a propertized string.
-The choice of string contents is based on `dsh-bridge--status-state'."
+The choice of string contents is based on `dsh-bridge--status-state', with a
+pending ask-user question taking display precedence (awaiting > running > idle
+> unknown)."
   (if (eq dsh-bridge-status-indicator 'none)
       ""
-    (let* ((state (dsh-bridge--status-state session-id))
+    (let* ((awaiting (dsh-bridge--session-awaiting-p session-id))
+           (state (dsh-bridge--status-state session-id))
            (char
-			(pcase dsh-bridge-status-indicator
-              ('geometric (pcase state ('idle "●")  ('running "■")  (_ "?")))
-              ('emoji (pcase state ('idle "🟢") ('running "🟡") (_ "⚪")))
-              (_ (pcase state ('idle "✓")  ('running "…")  (_ "?")))))
+			(if awaiting
+				(pcase dsh-bridge-status-indicator
+                  ('geometric "◌") ('emoji "⏳") (_ "!"))
+              (pcase dsh-bridge-status-indicator
+                ('geometric (pcase state ('idle "●")  ('running "■")  (_ "?")))
+                ('emoji (pcase state ('idle "🟢") ('running "🟡") (_ "⚪")))
+                (_ (pcase state ('idle "✓")  ('running "…")  (_ "?"))))))
            (face
-			(pcase state
-              ('idle    'dsh-bridge-status-idle-face)
-              ('running 'dsh-bridge-status-running-face)
-              (_        'dsh-bridge-status-unknown-face))))
+			(cond
+			 (awaiting 'dsh-bridge-status-awaiting-face)
+			 (state
+			  (pcase state
+                ('idle    'dsh-bridge-status-idle-face)
+                ('running 'dsh-bridge-status-running-face)
+                (_        'dsh-bridge-status-unknown-face))))))
       (propertize char 'face face))))
 
 ;;; DSH executable and plugin management
@@ -859,6 +884,8 @@ Currently supported events are:
   committed mid-turn).
 - `context': update `dsh-bridge--session-context' and re-render header
   lines reporting that data.
+- `ask-user': record a pending ask-user question and surface it.
+- `ask-user-resolved': retire a pending question (answered or cancelled).
 - `sessions-changed': update existing DSH-Sessions buffers."
   (when (seq-some (lambda (e) (equal (alist-get 'kind e) "sessions-changed"))
 				  events)
@@ -886,6 +913,10 @@ Currently supported events are:
 		  (dsh-bridge--status-set id 'idle)
 		  ;; Fold the turn's timestamp into the session cache.
 		  (dsh-bridge--session-update-last-active id (alist-get 'time event))
+		  ;; Defensive: a turn that ended without a resolved frame cannot still
+		  ;; be waiting on the user.  Clear before rendering, or the status
+		  ;; glyph would paint the just-stale `awaiting' state.
+		  (dsh-bridge--ask-user-session-clear id)
 		  (dsh-bridge--status-event-render id)
 		  (dsh-bridge--models-event-refresh id)
 		  (dsh-bridge--turn-complete-act id (alist-get 'reason event))))
@@ -911,7 +942,16 @@ Currently supported events are:
 			(push (cons id (cons used window)) dsh-bridge--session-context)
 			;; Redraw the prompt and view headers in the same tick.
 			(dsh-bridge--refresh-view-headers)
-			(force-mode-line-update t))))))))
+			(force-mode-line-update t))))
+	   ((equal kind "ask-user")
+		(let ((question-id (alist-get 'questionId event))
+			  (questions (alist-get 'questions event)))
+		  (when (and id question-id questions)
+			(dsh-bridge--ask-user-arrive id question-id questions))))
+	   ((equal kind "ask-user-resolved")
+		(when (and id (alist-get 'questionId event))
+		  (dsh-bridge--ask-user-resolved id (alist-get 'questionId event)
+										(alist-get 'outcome event))))))))
 
 (defvar dsh-bridge--sessions-changed-timer nil
   "Timer for debounced sessions-list refetch after a `sessions-changed' frame.")
@@ -1875,6 +1915,7 @@ turn-following marker appear while the shown session runs."
 		 (label (dsh-bridge--session-label id))
 		 (context (and id (dsh-bridge--prompt-context-label id)))
 		 (elapsed (and id (dsh-bridge--view-elapsed-label id)))
+		 (await (and id (dsh-bridge--session-awaiting-p id) " · awaiting your answer"))
 		 (time (if dsh-bridge--view-received-at
 				   (format-time-string
 					"%H:%M:%S" (/ dsh-bridge--view-received-at 1000))
@@ -1883,7 +1924,7 @@ turn-following marker appear while the shown session runs."
 	(string-replace "%" "%%"
 					(concat " " status " " pos " " label " · " time
 							(and context (concat " · " context))
-							elapsed follow))))
+							await elapsed follow))))
 
 (defun dsh-bridge--prompt-sent-marker (session-id)
   "The \" ✓ sent HH:MM\" marker when the buffer text was just sent, else \"\".
@@ -1966,6 +2007,7 @@ is applied."
 (define-key dsh-bridge-view-mode-map (kbd "r") #'dsh-bridge-reply)
 (define-key dsh-bridge-view-mode-map (kbd "w") #'dsh-bridge-copy-reply)
 (define-key dsh-bridge-view-mode-map (kbd "i") #'dsh-bridge-receive)
+(define-key dsh-bridge-view-mode-map (kbd "a") #'dsh-bridge-answer)
 (define-key dsh-bridge-view-mode-map (kbd "l") #'dsh-bridge-list-sessions)
 (define-key dsh-bridge-view-mode-map (kbd "M-p")
 			#'dsh-bridge-view-previous-reply)
@@ -2366,6 +2408,458 @@ cache knows it (outbox entries carry no `cwd', so this is best-effort)."
 		 (session-id (alist-get 'sessionId entry))
 		 (text (or (alist-get 'text entry) "")))
 	(dsh-bridge--fill-output-from-text session-id text (alist-get 'ts entry))))
+
+;;; Ask-user questions (the DSH `ask_user_question` tool)
+
+(defcustom dsh-bridge-question-auto-pop nil
+  "Whether an arriving ask-user question pops to its question buffer.
+When nil (the default), an ask is announced in the echo area and via the `⏳
+awaiting' status glyph; the user answers it with `a' (in the DSH-View or
+DSH-Sessions buffer) or by opening the question buffer directly.  Enable to
+auto-pop the question buffer on arrival (most users find that intrusive)."
+  :type 'boolean
+  :group 'dsh-bridge)
+
+;; Question buffer state and lookup -----------------------------------------
+;; (Defined before the registry maintenance below, which banners live buffers
+;; via `dsh-bridge--question-mark-resolved'.)
+
+;; The derived mode is defined later in this section; declare it here so the
+;; byte-compiler knows `dsh-bridge--question-buffer' calls a real function.
+(declare-function dsh-bridge-question-mode "dsh-bridge")
+
+(defvar-local dsh-bridge--question-id nil
+  "The question id (mux rpcId) this question buffer answers.")
+(defvar-local dsh-bridge--question-session nil
+  "The session id this question buffer asks about.")
+(defvar-local dsh-bridge--question-questions nil
+  "The parsed question list this buffer renders.")
+(defvar-local dsh-bridge--question-selection nil
+  "Alist of (QUESTION-ID . (SELECTED-LABEL ...)) for marked options.")
+(defvar-local dsh-bridge--question-custom nil
+  "Alist of (QUESTION-ID . CUSTOM-TEXT) for typed custom answers.")
+(defvar-local dsh-bridge--question-skipped nil
+  "List of QUESTION-IDs the user chose to skip (answered with no selection).")
+(defvar-local dsh-bridge--question-dead nil
+  "Non-nil once the question this buffer asks is resolved (answered/cancelled).")
+
+(defun dsh-bridge--question-find-buffer (question-id)
+  "The live question buffer answering QUESTION-ID, or nil."
+  (seq-find (lambda (buffer)
+			  (with-current-buffer buffer
+				(and (eq major-mode 'dsh-bridge-question-mode)
+					 (equal dsh-bridge--question-id question-id))))
+			(buffer-list)))
+
+(defun dsh-bridge--question-mark-resolved (_session-id question-id outcome)
+  "Banner the question buffer for QUESTION-ID as resolved by OUTCOME."
+  (let ((buffer (dsh-bridge--question-find-buffer question-id)))
+	(when (and buffer
+			   (with-current-buffer buffer (not dsh-bridge--question-dead)))
+	  (with-current-buffer buffer
+		(setq-local dsh-bridge--question-dead t)
+		(let ((inhibit-read-only t))
+		  (goto-char (point-min))
+		  (insert (propertize
+				   (format "This question was %s.\n\n"
+						   (if (equal outcome "cancelled") "cancelled" "answered elsewhere"))
+				   'face 'error))
+		  (goto-char (point-min)))))))
+
+;; Registry maintenance ----------------------------------------------------
+
+(defun dsh-bridge--ask-user-session-clear (session-id)
+  "Drop every pending ask for SESSION-ID, bannering any live question buffers.
+Defensive cleanup on `turn-complete': a turn that ended without a resolved
+frame cannot still be waiting on the user."
+  (dolist (pending (cdr (assoc session-id dsh-bridge--pending-questions)))
+	(dsh-bridge--question-mark-resolved session-id (car pending) "cancelled"))
+  (setq dsh-bridge--pending-questions
+		(assoc-delete-all session-id dsh-bridge--pending-questions)))
+
+(defun dsh-bridge--ask-user-arrive (session-id question-id questions)
+  "Record a newly arrived ask-user question, announce it, and render its buffer.
+A question-id already in the registry is a replay — the plugin re-announces
+pending asks to every reconnecting SSE client — so it just refreshes the
+stored copy, silently, without re-messaging or touching the question buffer."
+  (let* ((entry (assoc session-id dsh-bridge--pending-questions))
+		 (slot (and entry (assoc question-id (cdr entry)))))
+	(if slot
+		(setcdr slot questions)
+	  (if entry
+		  (setcdr entry (cons (cons question-id questions) (cdr entry)))
+		(push (cons session-id (list (cons question-id questions)))
+			  dsh-bridge--pending-questions))
+	  (let* ((first (car questions))
+			 (q (and (listp first) (alist-get 'question first))))
+		(message "dsh-bridge: session \"%s\" asks: %s ('a' to answer)"
+				 (dsh-bridge--session-label session-id)
+				 (or (and (stringp q) (substring q 0 (min 60 (length q)))) "")))
+	  (dsh-bridge--status-event-render session-id)
+	  (let ((buffer (dsh-bridge--question-buffer session-id question-id questions)))
+		(when dsh-bridge-question-auto-pop
+		  (pop-to-buffer buffer))))))
+
+(defun dsh-bridge--ask-user-resolved (session-id question-id outcome)
+  "Retire a pending ask for SESSION-ID when it was ANSWERED or CANCELLED."
+  (let ((entry (assoc session-id dsh-bridge--pending-questions)))
+	(when entry
+	  (setcdr entry (cl-delete question-id (cdr entry) :key #'car :test #'equal))
+	  (when (null (cdr entry))
+		(setq dsh-bridge--pending-questions
+			  (assoc-delete-all session-id dsh-bridge--pending-questions)))))
+  (dsh-bridge--status-event-render session-id)
+  (dsh-bridge--question-mark-resolved session-id question-id outcome))
+
+;; The question buffer -------------------------------------------------------
+
+(defun dsh-bridge--question-buffer (session-id question-id questions)
+  "Find or create the question buffer for QUESTION-ID and return it.
+A live buffer already answering QUESTION-ID is returned untouched, so burying
+with `q' and returning with `a' keeps any in-progress marks.  A name collision
+(two sessions sharing a label, each with a pending ask) gets a fresh name."
+  (let ((existing (dsh-bridge--question-find-buffer question-id)))
+	(if (and existing
+			 (with-current-buffer existing (not dsh-bridge--question-dead)))
+		existing
+	  (let* ((base (format "*dsh-bridge-question: %s*"
+						   (dsh-bridge--session-label session-id)))
+			 (name (if (and (get-buffer base)
+							(with-current-buffer (get-buffer base)
+							  (and (eq major-mode 'dsh-bridge-question-mode)
+								   (not dsh-bridge--question-dead))))
+					   (generate-new-buffer-name base)
+					 base))
+			 (buffer (get-buffer-create name)))
+		(with-current-buffer buffer
+		  (unless (eq major-mode 'dsh-bridge-question-mode)
+			(dsh-bridge-question-mode))
+		  (setq-local dsh-bridge--question-id question-id)
+		  (setq-local dsh-bridge--question-session session-id)
+		  (setq-local dsh-bridge--question-questions questions)
+		  (setq-local dsh-bridge--question-selection nil)
+		  (setq-local dsh-bridge--question-custom nil)
+		  (setq-local dsh-bridge--question-skipped nil)
+		  (setq-local dsh-bridge--question-dead nil)
+		  (dsh-bridge--question-render))
+		buffer))))
+
+(defun dsh-bridge--question-render ()
+  "Populate the current question buffer from its state variables.
+The whole buffer is re-rendered from `dsh-bridge--question-questions' plus the
+selection/custom/skipped state on every change, so markers can never drift.
+Every line of a question's block carries its question id as a text property,
+so point anywhere in the block identifies the question."
+  (let ((inhibit-read-only t))
+	(erase-buffer)
+	(insert (propertize
+			 (format "Session \"%s\" is waiting for your answer\n\n"
+					 (dsh-bridge--session-label dsh-bridge--question-session))
+			 'face 'bold))
+	(let ((n 0)
+		  (total (length dsh-bridge--question-questions)))
+	  (dolist (question dsh-bridge--question-questions)
+		(let* ((qid (alist-get 'id question))
+			   (qtext (alist-get 'question question))
+			   (header (alist-get 'header question))
+			   (detail (alist-get 'detail question))
+			   (opts (alist-get 'options question))
+			   (selected (cdr (assoc qid dsh-bridge--question-selection)))
+			   (custom (cdr (assoc qid dsh-bridge--question-custom)))
+			   (skipped (member qid dsh-bridge--question-skipped))
+			   (block-start (point)))
+		  (when (> n 0) (insert "\n"))
+		  (cl-incf n)
+		  (insert (format "Question %d of %d%s\n\n" n total
+						  (if skipped " — skipped" "")))
+		  (when (and (stringp header) (not (string-empty-p header)))
+			(insert (propertize (concat header "\n") 'face 'bold)))
+		  (insert (format "%s\n" (or qtext "")))
+		  ;; The reviewed artifact (a plan-review's plan markdown) must be
+		  ;; visible: deciding on it blind is worse than not surfacing it.
+		  (when (and (stringp detail) (not (string-empty-p detail)))
+			(insert "\n" detail "\n"))
+		  (insert "\n")
+		  (let ((i 0))
+			(dolist (opt opts)
+			  (cl-incf i)
+			  (let* ((label (or (alist-get 'label opt) ""))
+					 (desc (alist-get 'description opt))
+					 (start (point)))
+				(insert (format "  [%s] %d. %s%s\n"
+								(if (member label selected) "x" " ")
+								i label
+								(if (and (stringp desc) (not (string-empty-p desc)))
+									(concat " — " desc) "")))
+				(put-text-property start (1- (point)) 'dsh-bridge-option label))))
+		  ;; The custom-answer row is always present (the web UI offers one per
+		  ;; question): RET or `c' prompts for the text.
+		  (let ((start (point)))
+			(insert (format "  [%s] c. %s\n"
+							(if (and custom (not (string-empty-p custom))) "x" " ")
+							(if (and custom (not (string-empty-p custom)))
+								(concat "Custom: " custom)
+							  "Type a custom answer")))
+			(put-text-property start (1- (point)) 'dsh-bridge-option-custom t))
+		  (put-text-property block-start (point) 'dsh-bridge-question-id qid))))
+	(goto-char (point-min))))
+
+(defun dsh-bridge--question-at-point ()
+  "The question id of the block at point, or nil."
+  (or (get-text-property (point) 'dsh-bridge-question-id)
+	  (get-text-property (line-beginning-position) 'dsh-bridge-question-id)))
+
+(defun dsh-bridge--question-multi-p (qid)
+  "Whether question QID is a multi-select."
+  (seq-some (lambda (q) (and (equal (alist-get 'id q) qid)
+							 (eq (alist-get 'multiSelect q) t)))
+			dsh-bridge--question-questions))
+
+(defun dsh-bridge--question-set-selection (qid labels)
+  "Set question QID's marked option labels to LABELS."
+  (setq dsh-bridge--question-selection
+		(assoc-delete-all qid dsh-bridge--question-selection))
+  (push (cons qid labels) dsh-bridge--question-selection))
+
+(defun dsh-bridge--question-rerender-at-point ()
+  "Re-render after a state change, restoring point by line and column."
+  (let ((line (line-number-at-pos))
+		(col (current-column)))
+	(dsh-bridge--question-render)
+	(goto-char (point-min))
+	(forward-line (1- line))
+	(move-to-column col)))
+
+(defun dsh-bridge--question-toggle-option (qid label)
+  "Toggle LABEL for question QID (radio for single-select, checkbox for multi).
+A single-select pick supersedes any typed custom answer, and any pick rescinds
+a skip."
+  (let* ((multi (dsh-bridge--question-multi-p qid))
+		 (selected (cdr (assoc qid dsh-bridge--question-selection))))
+	(if (member label selected)
+		(setq selected (delete label selected))
+	  (setq selected (if multi (append selected (list label)) (list label)))
+	  (unless multi
+		(setq dsh-bridge--question-custom
+			  (assoc-delete-all qid dsh-bridge--question-custom))))
+	(dsh-bridge--question-set-selection qid selected)
+	(setq dsh-bridge--question-skipped (delete qid dsh-bridge--question-skipped))
+	(dsh-bridge--question-rerender-at-point)))
+
+(defun dsh-bridge--question-custom-answer (qid)
+  "Prompt for a custom (free-text) answer to question QID.
+An empty response clears the custom answer.  For a single-select question the
+custom text supersedes any marked option; for a multi-select it accompanies
+the marks (the harness's `matchesQuestions' wire rules)."
+  (interactive (list (or (dsh-bridge--question-at-point)
+						 (user-error "dsh-bridge: no question at point"))))
+  (let* ((question (seq-find (lambda (q) (equal (alist-get 'id q) qid))
+							 dsh-bridge--question-questions))
+		 (current (cdr (assoc qid dsh-bridge--question-custom)))
+		 (text (read-string (format "Custom answer for \"%s\": "
+									(or (and question (alist-get 'question question)) ""))
+							current)))
+	(if (string-empty-p text)
+		(setq dsh-bridge--question-custom
+			  (assoc-delete-all qid dsh-bridge--question-custom))
+	  (setq dsh-bridge--question-custom
+			(assoc-delete-all qid dsh-bridge--question-custom))
+	  (push (cons qid text) dsh-bridge--question-custom)
+	  (unless (dsh-bridge--question-multi-p qid)
+		(dsh-bridge--question-set-selection qid nil)))
+	(setq dsh-bridge--question-skipped (delete qid dsh-bridge--question-skipped))
+	(dsh-bridge--question-rerender-at-point)))
+
+(defun dsh-bridge--question-toggle-at-point ()
+  "Toggle the option at point; on the custom row, prompt for custom text."
+  (interactive)
+  (let ((qid (dsh-bridge--question-at-point)))
+	(cond
+	 ((null qid) (message "dsh-bridge: no question at point"))
+	 ((get-text-property (line-beginning-position) 'dsh-bridge-option-custom)
+	  (dsh-bridge--question-custom-answer qid))
+	 ((get-text-property (line-beginning-position) 'dsh-bridge-option)
+	  (dsh-bridge--question-toggle-option
+	   qid (get-text-property (line-beginning-position) 'dsh-bridge-option)))
+	 (t (message "dsh-bridge: no option at point")))))
+
+(defun dsh-bridge--question-toggle-number ()
+  "Toggle the Nth option of the question at point, N from the digit pressed."
+  (interactive)
+  (let* ((qid (dsh-bridge--question-at-point))
+		 (n (string-to-number (this-command-keys)))
+		 (question (and qid (seq-find (lambda (q) (equal (alist-get 'id q) qid))
+									  dsh-bridge--question-questions)))
+		 (opts (and question (alist-get 'options question)))
+		 (opt (and (>= n 1) (<= n (length opts)) (nth (1- n) opts))))
+	(if opt
+		(dsh-bridge--question-toggle-option qid (or (alist-get 'label opt) ""))
+	  (message "dsh-bridge: no option %d here" n))))
+
+(defun dsh-bridge--question-next ()
+  "Move point to the next question block, wrapping to the first."
+  (interactive)
+  (let ((here (dsh-bridge--question-at-point))
+		(found nil))
+	(save-excursion
+	  (while (and (not found) (eq 0 (forward-line 1)))
+		(let ((qid (dsh-bridge--question-at-point)))
+		  (when (and qid (not (equal qid here)))
+			(setq found (point))))))
+	(goto-char (or found (point-min)))))
+
+(defun dsh-bridge--question-skip ()
+  "Toggle skipping the question at point.
+A skipped question is answered with an empty selection — the web UI's skip
+affordance, valid under the apiproxy's `matchesQuestions'.  Skipping clears
+any marks and custom text for the question."
+  (interactive)
+  (let ((qid (dsh-bridge--question-at-point)))
+	(if (null qid)
+		(message "dsh-bridge: no question at point")
+	  (if (member qid dsh-bridge--question-skipped)
+		  (setq dsh-bridge--question-skipped
+				(delete qid dsh-bridge--question-skipped))
+		(push qid dsh-bridge--question-skipped)
+		(dsh-bridge--question-set-selection qid nil)
+		(setq dsh-bridge--question-custom
+			  (assoc-delete-all qid dsh-bridge--question-custom)))
+	  (dsh-bridge--question-rerender-at-point))))
+
+(defun dsh-bridge--question-validate ()
+  "Return the answers list for POSTing if every question is settled, else nil.
+A question is settled when it is skipped, has a marked option, or has a typed
+custom answer.  Wire shape per answer: { id, selected, custom? } where
+`selected' holds option labels only — a skipped or custom-only answer sends an
+empty array, and a single-select custom answer never travels with a selection
+(the apiproxy's `matchesQuestions' rejects both violations)."
+  (let (answers failed)
+	(dolist (question dsh-bridge--question-questions)
+	  (let* ((qid (alist-get 'id question))
+			 (multi (eq (alist-get 'multiSelect question) t))
+			 (skipped (member qid dsh-bridge--question-skipped))
+			 (selected (cdr (assoc qid dsh-bridge--question-selection)))
+			 (custom (cdr (assoc qid dsh-bridge--question-custom)))
+			 (custom (and custom (not (string-empty-p custom)) custom)))
+		(cond
+		 (skipped
+		  (push (list (cons 'id qid) (cons 'selected [])) answers))
+		 ((or selected custom)
+		  (push (append (list (cons 'id qid)
+							  (cons 'selected
+									(vconcat (if (or multi (null custom)) selected '()))))
+						(and custom (list (cons 'custom custom))))
+				answers))
+		 (t (setq failed t)))))
+	(and (not failed) (nreverse answers))))
+
+(defun dsh-bridge--question-submit ()
+  "Validate and POST the answers for this question buffer."
+  (interactive)
+  (if dsh-bridge--question-dead
+	  (message "dsh-bridge: this question was already resolved")
+	(let ((answers (dsh-bridge--question-validate)))
+	  (when (null answers)
+		(message "dsh-bridge: not all questions answered"))
+	  (when answers
+		(dsh-bridge--call "POST" "/answer"
+		  (append (list (cons 'questionId dsh-bridge--question-id)
+						(cons 'sessionId dsh-bridge--question-session))
+				  (list (cons 'answers answers)))
+		  (lambda (status body http-status)
+			(let* ((alist (condition-case nil
+							(json-parse-string body :object-type 'alist)
+						  (error nil)))
+				   (reason (and alist (alist-get 'reason alist)))
+				   (accepted (and alist (alist-get 'accepted alist))))
+			  (cond
+			   ((and status (null accepted))
+				(message "dsh-bridge: %s" (dsh-bridge--error-message status http-status alist)))
+			   ((and reason (equal reason "not-pending"))
+				(message "dsh-bridge: already answered or cancelled")
+				(dsh-bridge--question-mark-resolved
+				 dsh-bridge--question-session dsh-bridge--question-id "answered"))
+			   (accepted
+				(message "dsh-bridge: answer sent to \"%s\""
+						 (dsh-bridge--session-label dsh-bridge--question-session))
+				(dsh-bridge--question-mark-resolved
+				 dsh-bridge--question-session dsh-bridge--question-id "answered"))
+			   (t (message "dsh-bridge: answer not accepted%s"
+						   (if reason (concat ": " reason) "")))))))))))
+
+(defun dsh-bridge--question-decline ()
+  "Tell the model we will not answer (cancels the ask_user_question tool call)."
+  (interactive)
+  (if dsh-bridge--question-dead
+	  (message "dsh-bridge: this question was already resolved")
+	(dsh-bridge--call "POST" "/answer"
+	  (list (cons 'questionId dsh-bridge--question-id)
+			(cons 'sessionId dsh-bridge--question-session)
+			(cons 'cancelled t))
+	  (lambda (_status body _http-status)
+		(let* ((alist (condition-case nil
+						(json-parse-string body :object-type 'alist)
+					  (error nil)))
+			   (reason (and alist (alist-get 'reason alist)))
+			   (accepted (and alist (alist-get 'accepted alist))))
+		  (cond
+		   (accepted
+			(message "dsh-bridge: question cancelled")
+			(dsh-bridge--question-mark-resolved
+			 dsh-bridge--question-session dsh-bridge--question-id "cancelled"))
+		   ((and reason (equal reason "not-pending"))
+			(message "dsh-bridge: already answered or cancelled"))
+		   (t (message "dsh-bridge: decline not accepted%s"
+					   (if reason (concat ": " reason) "")))))))))
+
+;; The `a' (answer) key and the question mode --------------------------------
+
+(defun dsh-bridge-answer ()
+  "Open the pending ask-user question buffer for the session at hand.
+In a DSH-View / DSH-Prompt / DSH-Sessions buffer, answers the shown / point
+session; otherwise reports that no question is pending."
+  (interactive)
+  (let* ((session (cond
+				  ((and (eq major-mode 'dsh-bridge-view-mode)
+						dsh-bridge--view-content-session)
+				   dsh-bridge--view-content-session)
+				  ((eq major-mode 'dsh-bridge-prompt-mode)
+				   (dsh-bridge--prompt-status-session))
+				  ((eq major-mode 'dsh-bridge-sessions-mode)
+				   (tabulated-list-get-id))))
+		 (entry (and session (dsh-bridge--pending-question session))))
+	(cond
+	 (entry
+	  (pop-to-buffer (dsh-bridge--question-buffer session (car entry) (cdr entry))))
+	 (session
+	  (message "dsh-bridge: session \"%s\" has no pending question"
+			   (dsh-bridge--session-label session)))
+	 (t (message "dsh-bridge: no pending question")))))
+
+(defun dsh-bridge--define-question-mode ()
+  "Define `dsh-bridge-question-mode'."
+  (define-derived-mode dsh-bridge-question-mode special-mode "DSH-Question"
+	"Major mode for an ask-user question buffer.
+Read-only; mark options with `RET' or an option's number key, type a custom
+answer on the `c' row, skip the question at point with `C-c C-s', move between
+questions with `TAB'.  `C-c C-c' submits the answer, `C-c C-k' declines
+(cancels the tool call), `q' buries without answering (the question stays
+pending and `a' reopens the buffer with any marks intact)."))
+(dsh-bridge--define-question-mode)
+
+(defvar dsh-bridge-question-mode-map)
+(define-key dsh-bridge-question-mode-map (kbd "RET") #'dsh-bridge--question-toggle-at-point)
+(define-key dsh-bridge-question-mode-map (kbd "c") #'dsh-bridge--question-custom-answer)
+(define-key dsh-bridge-question-mode-map (kbd "TAB") #'dsh-bridge--question-next)
+(define-key dsh-bridge-question-mode-map (kbd "C-c C-s") #'dsh-bridge--question-skip)
+(define-key dsh-bridge-question-mode-map (kbd "C-c C-c") #'dsh-bridge--question-submit)
+(define-key dsh-bridge-question-mode-map (kbd "C-c C-k") #'dsh-bridge--question-decline)
+(define-key dsh-bridge-question-mode-map (kbd "q") #'quit-window)
+(define-key dsh-bridge-question-mode-map (kbd "n") #'forward-line)
+(define-key dsh-bridge-question-mode-map (kbd "p") #'previous-line)
+(dotimes (i 9)
+  (define-key dsh-bridge-question-mode-map (kbd (number-to-string (1+ i)))
+			  #'dsh-bridge--question-toggle-number))
 
 ;;; Prompt-buffer model selection and context occupancy
 
@@ -2805,6 +3299,11 @@ pin to write, and clearing has no host round-trip."
   "Face for the unknown session status glyph (shadow)."
   :group 'dsh-bridge)
 
+(defface dsh-bridge-status-awaiting-face
+  '((t :inherit bold :foreground "orange"))
+  "Face for a session whose turn is paused on an ask-user question."
+  :group 'dsh-bridge)
+
 (defun dsh-bridge--default-target-marker (session)
   "Return the leftmost marker cell for SESSION: \"*\" when it is the default
 target, else a space."
@@ -2884,6 +3383,8 @@ notifications."
 			#'dsh-bridge-clear-default-target)
 (define-key dsh-bridge-sessions-mode-map (kbd "f")
 			#'dsh-bridge-peek-session)
+(define-key dsh-bridge-sessions-mode-map (kbd "a")
+			#'dsh-bridge-answer)
 (define-key dsh-bridge-sessions-mode-map (kbd "v")
 			#'dsh-bridge-toggle-archived-sessions)
 (define-key dsh-bridge-sessions-mode-map (kbd "R")

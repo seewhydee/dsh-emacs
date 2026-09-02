@@ -2707,5 +2707,182 @@ reply; a non-following view is left alone."
     (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
       (kill-buffer "*dsh-bridge-output*"))))
 
+;;; Ask-user questions: registry, awaiting glyph, and the question buffer.
+
+(ert-deftest dsh-bridge-ask-user-arrive-and-glyph ()
+  "An ask-user frame records a pending question, lights the awaiting glyph, and
+spells out 'awaiting your answer' in the shown view header.  A repeat frame
+for the same question id (the plugin's reconnect replay) refreshes the stored
+copy silently instead of duplicating the registry entry."
+  (let ((dsh-bridge--pending-questions nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (messages 0))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf messages)))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore))
+      (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
+      (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go? v2") ))))
+    (should (equal messages 1))
+    (should (equal (length (cdr (assoc "s1" dsh-bridge--pending-questions))) 1))
+    (should (dsh-bridge--session-awaiting-p "s1"))
+    (let ((dsh-bridge-status-indicator 'emoji))
+      (should (string= (dsh-bridge--status-glyph "s1") "⏳")))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "s1")
+      (should (string-match-p "awaiting your answer" (dsh-bridge--view-header-line))))
+    (dsh-bridge--ask-user-session-clear "s1")
+    (should-not (dsh-bridge--session-awaiting-p "s1"))
+    ;; The defensive clear also banners the live question buffer.
+    (with-current-buffer (dsh-bridge--question-find-buffer "q1")
+      (should dsh-bridge--question-dead)
+      (should (string-match-p "cancelled" (buffer-string))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-output*"))
+      (kill-buffer "*dsh-bridge-output*"))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-ask-user-resolved ()
+  "A resolved frame retires the pending question and banners the question buffer."
+  (let ((dsh-bridge--pending-questions nil)
+        (dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _) nil))
+              ((symbol-function 'dsh-bridge--status-event-render) #'ignore))
+      (dsh-bridge--ask-user-arrive "s1" "q1" '(( (id . "q1") (question . "Go?") )))
+      (dsh-bridge--ask-user-resolved "s1" "q1" "answered"))
+    (should-not (dsh-bridge--session-awaiting-p "s1"))
+    (with-current-buffer (get-buffer "*dsh-bridge-question: T*")
+      (should dsh-bridge--question-dead)
+      (should (string-match-p "answered elsewhere" (buffer-string))))
+    (when (buffer-live-p (get-buffer "*dsh-bridge-question: T*"))
+      (kill-buffer "*dsh-bridge-question: T*"))))
+
+(ert-deftest dsh-bridge-question-toggle-radio ()
+  "Option marking is radio behavior for single-select questions, and reopening
+the buffer for the same question keeps the marks (bury-then-return flow)."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (questions '(( (id . "q1") (question . "Go?")
+                       (options . (((label . "Yes")) ((label . "No")))) )))
+        (buffer nil))
+    (setq buffer (dsh-bridge--question-buffer "s1" "q1" questions))
+    (with-current-buffer buffer
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (should (equal (cdr (assoc "q1" dsh-bridge--question-selection)) '("Yes")))
+      (re-search-forward "2\\. No")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (should (equal (cdr (assoc "q1" dsh-bridge--question-selection)) '("No")))
+      ;; A digit key toggles the nth option of the block at point (batch mode
+      ;; cannot drive key macros, so the command's key lookup is mocked).
+      (cl-letf (((symbol-function 'this-command-keys) (lambda () "1")))
+        (dsh-bridge--question-toggle-number))
+      (should (equal (cdr (assoc "q1" dsh-bridge--question-selection)) '("Yes"))))
+    ;; Reopening via `a' finds the same buffer without wiping the marks.
+    (should (eq (dsh-bridge--question-buffer "s1" "q1" questions) buffer))
+    (with-current-buffer buffer
+      (should (equal (cdr (assoc "q1" dsh-bridge--question-selection)) '("Yes")))
+      (should (string-match-p "\\[x\\] 1\\. Yes" (buffer-string))))
+    (kill-buffer buffer)))
+
+(ert-deftest dsh-bridge-question-validate-and-submit ()
+  "Submission POSTs alist-shaped answers to /dsh-bridge/answer — the wire shape
+the apiproxy validates (regression: plist-style lists encode as junk JSON)."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t))))
+        (posted nil))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")) ((label . "No")))) )))
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (should (equal (dsh-bridge--question-validate)
+                     (list (list (cons 'id "q1") (cons 'selected (vector "Yes"))))))
+      (cl-letf (((symbol-function 'dsh-bridge--call)
+                 (lambda (_m _p payload cb)
+                   (setq posted payload)
+                   (funcall cb nil "{\"accepted\":true}" 200))))
+        (dsh-bridge--question-submit))
+      (should (equal (alist-get 'questionId posted) "q1"))
+      (should (equal (alist-get 'sessionId posted) "s1"))
+      (should (equal (json-encode (list (cons 'answers (alist-get 'answers posted))))
+                     "{\"answers\":[{\"id\":\"q1\",\"selected\":[\"Yes\"]}]}"))
+      ;; An accepted submit retires the buffer.
+      (should dsh-bridge--question-dead)
+      (should (string-match-p "answered elsewhere" (buffer-string))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-custom-wire-shape ()
+  "A single-select custom answer travels with an empty `selected' array and a
+`custom' string; a multi-select custom answer may accompany marked options —
+the two shapes the apiproxy's `matchesQuestions' accepts."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    ;; Single-select: a custom answer supersedes the marks.
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")) ((label . "No")))) )))
+      (goto-char (point-min))
+      (re-search-forward "c\\. Type a custom answer")
+      (goto-char (line-beginning-position))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "because reasons")))
+        (dsh-bridge--question-toggle-at-point))
+      (should (equal (json-encode (list (cons 'answers (dsh-bridge--question-validate))))
+                     "{\"answers\":[{\"id\":\"q1\",\"selected\":[],\"custom\":\"because reasons\"}]}")))
+    ;; Multi-select: marks and custom travel together.
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q2"
+          '(( (id . "q2") (question . "Pick?") (multiSelect . t)
+              (options . (((label . "A")) ((label . "B")))) )))
+      (goto-char (point-min))
+      (re-search-forward "1\\. A")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "and C")))
+        (dsh-bridge--question-custom-answer "q2"))
+      (should (equal (json-encode (list (cons 'answers (dsh-bridge--question-validate))))
+                     "{\"answers\":[{\"id\":\"q2\",\"selected\":[\"A\"],\"custom\":\"and C\"}]}")))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))
+    (when (dsh-bridge--question-find-buffer "q2")
+      (kill-buffer (dsh-bridge--question-find-buffer "q2")))))
+
+(ert-deftest dsh-bridge-question-skip ()
+  "Skipping settles a question with an empty selection and clears its marks;
+unskipping leaves the question unsettled again."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Go?") (options . (((label . "Yes")))) )))
+      (goto-char (point-min))
+      (re-search-forward "1\\. Yes")
+      (goto-char (line-beginning-position))
+      (dsh-bridge--question-toggle-at-point)
+      (dsh-bridge--question-skip)
+      (should (null (cdr (assoc "q1" dsh-bridge--question-selection))))
+      (should (string-match-p "Question 1 of 1 — skipped" (buffer-string)))
+      (should (equal (json-encode (list (cons 'answers (dsh-bridge--question-validate))))
+                     "{\"answers\":[{\"id\":\"q1\",\"selected\":[]}]}"))
+      (dsh-bridge--question-skip)
+      (should (null (dsh-bridge--question-validate))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
+(ert-deftest dsh-bridge-question-renders-detail ()
+  "A plan-review question's `detail' (the reviewed artifact) is rendered."
+  (let ((dsh-bridge--sessions-cache '(((id . "s1") (title . "T") (live . t)))))
+    (with-current-buffer
+        (dsh-bridge--question-buffer "s1" "q1"
+          '(( (id . "q1") (question . "Execute this plan?")
+              (detail . "## Plan\n\n1. Do the thing")
+              (intent . ((kind . "plan-review") (approve . "Approve")))
+              (options . (((label . "Approve")) ((label . "Refuse")))) )))
+      (should (string-match-p "## Plan" (buffer-string)))
+      (should (string-match-p "1\\. Do the thing" (buffer-string))))
+    (when (dsh-bridge--question-find-buffer "q1")
+      (kill-buffer (dsh-bridge--question-find-buffer "q1")))))
+
 (provide 'dsh-bridge-tests)
 ;;; dsh-bridge-tests.el ends here

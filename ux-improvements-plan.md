@@ -1,9 +1,8 @@
 # dsh-emacs-bridge UX improvement plan
 
-Status: **partially implemented.** Sections 1–4 (turn-following view,
-blank-on-send, jump-to-view on `C-c C-c`, live pulse + boundary echo) are
-implemented and tested. Section 5 (ask-user handling) is the remaining second
-phase.
+Status: **implemented.** Sections 1–4 (turn-following view, blank-on-send,
+jump-to-view on `C-c C-c`, live pulse + boundary echo) and section 5 (ask-user
+handling) are implemented and tested.
 
 This plan is scoped to **`dsh-emacs-bridge` only**. No change to the
 DeepSeek Harness (DSH) sources is permitted: the package must stay a drop-in,
@@ -243,7 +242,9 @@ recovers them. Instead:
    its current pending asks as `ask-user` frames to each new
    `/dsh-bridge/events` client on connect**, mirroring the mux's own replay,
    so an Emacs restart or a late `dsh-bridge-notifications-start` does not
-   lose a pending question.
+   lose a pending question. Since every SSE reconnect replays the whole
+   pending set, Emacs deduplicates re-announced question ids silently
+   (refreshing the stored copy) rather than re-messaging or re-rendering.
 3. **Answering** is `POST /dsh-bridge/answer` (bearer-authed, body-capped
    like every other route), which the plugin proxies to `POST /api/respond`.
    The mux subscription stays **host-side**: Emacs could technically reach
@@ -320,9 +321,12 @@ sessions can have pending asks concurrently, so the unit is the **ask
 - **Lifecycle:** on `ask-user-resolved`, do not kill the buffer out from
   under someone mid-selection. Insert a top banner ("This question was
   answered elsewhere / cancelled"), set the dead flag, and make `C-c C-c`
-  just message "question already resolved". If the buffer is not displayed
-  anywhere, killing it outright is fine. A `turn-complete` for the session
-  without a resolved frame (missed event) retires it the same way.
+  just message that the question was already resolved. A `turn-complete` for
+  the session without a resolved frame (missed event) retires it the same
+  way — and that clear must run *before* the status re-render, or the header
+  paints the just-stale awaiting glyph. Buffers are located by their
+  question id, not by name, so two sessions sharing a label cannot clobber
+  each other's question buffer.
 
 ### The selection interface: marked lines, not the widget library
 
@@ -340,22 +344,34 @@ text-and-keymap aesthetic, and miserable to ERT-test. Instead, the
    [ ] 3. Something else (type a custom answer)
 ```
 
-- Each option line carries its option id as a text property. `RET` (or the
-  option's number key) on the line **toggles** it, rewriting just the
-  `[ ]`/`[x]` marker. Single-choice questions get radio behavior (selecting
-  one clears the others); `multiSelect` gets checkbox behavior.
-- A "custom" option (the answer schema's `custom?` field) prompts via
-  minibuffer `read-string` and shows the entered text inline.
-- `n`/`p` move between option lines; `TAB` jumps to the next question.
+- Each option line carries its label as a text property; every line of a
+  question's block carries the question id. `RET` (or the option's number
+  key) on the line **toggles** it. Single-choice questions get radio
+  behavior (selecting one clears the others *and* any custom text);
+  `multiSelect` gets checkbox behavior. The buffer is re-rendered from the
+  state variables on every change, so markers can never drift.
+- Every question gets a **`c` custom-answer row** (the web UI offers one per
+  question): `RET` or `c` prompts via minibuffer `read-string` and shows the
+  entered text inline. Wire rules, mirroring the apiproxy's
+  `matchesQuestions` (`api-proxy.ts:657`) and the web client's
+  `QuestionComposer`: `selected` holds option labels only — a custom-only or
+  skipped answer sends `selected: []`; a single-select answer never carries
+  `custom` together with a selection; a multi-select may carry both.
+- **`C-c C-s` skips the question at point** — answered with
+  `{ id, selected: [] }`, the web UI's skip affordance. Skipping clears the
+  question's marks and custom text; the header line shows `— skipped`.
+- `n`/`p` move line-wise; `TAB` jumps to the next question (wrapping).
 - `plan-review` intent: render the `detail` markdown above the options (raw
-  markdown reads fine; no fontification in v1) plus an explicit
-  `[ ] Approve plan` toggle line that sets `intent.approve`.
-- `C-c C-c` validates client-side (every question answered; single-choice
-  has exactly one selection; selected ⊆ options) — mirroring
-  `matchesQuestions` so a malformed answer never makes the round trip — then
-  POSTs `/dsh-bridge/answer` with `{ questionId, sessionId, answers }`. On
-  accepted: kill the buffer, echo `answer sent to "Label"`. On
-  `not-pending`: the race path above.
+  markdown reads fine; no fontification). No special approve toggle is
+  needed: the harness validates that a plan-review's `intent.approve` label
+  is one of the question's options (`user-questions/src/index.ts:124`), so
+  approving is an ordinary option selection.
+- `C-c C-c` validates client-side (every question settled: marked, custom,
+  or skipped) — mirroring `matchesQuestions` so a malformed answer never
+  makes the round trip — then POSTs `/dsh-bridge/answer` with
+  `{ questionId, sessionId, answers }`. On accepted: banner the buffer as
+  resolved, echo `answer sent to "Label"`. On `not-pending`: the race path
+  above.
 - `C-c C-k` **declines**: `POST /api/respond` explicitly accepts
   `{ ok: false, error: { code: "cancelled" } }` → `ASK_CANCELLED`, which is
   how the web UI's cancel works. This is the difference between "ignore the
@@ -377,22 +393,18 @@ bump discipline the repo already applies to the client-artifact contract in
 Before implementing, confirm the reference checkout at `../deepseek-harness/`
 matches the pinned `peerDependencies` range so these shapes are current.
 
-### Pre-flight check + host mux lifecycle (do first)
+### Host mux lifecycle — resolved during implementation
 
-The one real risk in this section is the mux subscribe, so smoke-test it before
-building the question buffer:
-
-- Confirm the plugin can hold a **streaming GET** to
-  `${webBaseUrl}/api/events.mux` with an `AbortSignal` (the existing
-  `rpcCall` carrier only POSTs; the mux is a long-lived SSE read), and that the
-  frames arrive as plain `data:` lines. If loopback auth unexpectedly fences
-  `/api` for a raw GET, stop and re-plan rather than build the whole surface on
-  an unworkable transport.
-- The plugin's mux connection is **long-lived** and needs persistent reconnect
-  + frame dedupe, mirroring the Emacs notifications stream
-  (`dsh-bridge-notifications-start`/`-stop` and the reconnect-with-retry
-  discipline). Keep a single subscription per plugin lifetime and re-subscribe
-  on teardown/reconnect.
+The pre-flight worry (can the plugin hold a streaming `GET
+/api/events.mux`?) was settled by experiment: a plain GET returns **426** —
+the mux is WebSocket-served over HTTP. Rather than run a loopback WebSocket
+client, the plugin consumes the mux **in-process** via the optional
+`apiProxy` service (`ctx.get('apiProxy')`, degrading to a no-op when the
+profile lacks it), and answers through `apiProxy.respond`. The subscription
+is a single per-lifetime async iterator with quiet-abort teardown and a 2 s
+reconnect pause; mux replay on re-subscribe restores still-pending asks, and
+the plugin in turn replays its pending map to each new `/dsh-bridge/events`
+client. Recorded in AGENTS.md's version-bump list.
 
 ---
 
@@ -467,10 +479,12 @@ observable behavior, so each change above updates its test in the same change.
 
 ## Deferred / open decisions
 
-None blocking. Two formerly open questions are now settled: the live elapsed
-ticker ships **default-on** behind a `defcustom` (it only runs for the session
-the user is looking at), and there is **no minibuffer shortcut** for
-single-choice questions in v1 (revisit if usage shows single-choice
-dominating). The one pre-implementation check is confirming the
-`../deepseek-harness/` reference checkout matches the pinned `peerDependencies`
-range so the documented mux/respond shapes are current.
+None blocking. Settled along the way: the live elapsed ticker ships
+**default-on** behind a `defcustom` (it only runs for the session the user is
+looking at); there is **no minibuffer shortcut** for single-choice questions in
+v1 (revisit if usage shows single-choice dominating); and the question buffer
+grew a **skip affordance** (`C-c C-s`) because the harness accepts an empty
+selection as a valid answer. The `../deepseek-harness/` reference-checkout
+concern resolved itself in practice: the wire shapes were re-verified against
+it during implementation (which is how the 426/WebSocket-only mux discovery
+surfaced).

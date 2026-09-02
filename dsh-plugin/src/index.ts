@@ -31,6 +31,8 @@
 //   POST /dsh-bridge/outbox { text, sessionId, source? } -> deposit an entry
 //        (sessionId required: every entry is session-scoped)
 //   POST /dsh-bridge/outbox/ack { ids }           -> clear collected entries
+//   POST /dsh-bridge/answer { questionId, sessionId, answers? | cancelled? }
+//        -> settle a pending ask-user question (proxied to api-proxy respond)
 //   POST /dsh-bridge/sessions/resume { sessionId }        -> resume a cold session
 //   POST /dsh-bridge/sessions/rename { sessionId, title } -> rename (resumes cold)
 //   POST /dsh-bridge/sessions/archive { sessionId }       -> archive (one-way)
@@ -52,6 +54,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { Outbox } from './outbox.ts'
 import {
+  askUserMessage,
+  askUserResolvedMessage,
   assistantMessageHasText,
   assistantReplies,
   classifySessionId,
@@ -66,6 +70,10 @@ import {
   outboxMessage,
   outboxSessionId,
   parseBearerAuthorization,
+  questionAnswerEnvelope,
+  questionCancelEnvelope,
+  questionRequestedPayload,
+  questionResolvedPayload,
   repliesChangedMessage,
   resolveTargetId,
   rpcRequestFrame,
@@ -80,7 +88,9 @@ import {
   workspaceRefsBySession,
   workspaceTitleConflict,
   type LiveSessionLike,
+  type AskUserQuestionItemLike,
   type MessageBlockLike,
+  type QuestionAnswerEnvelope,
   type ResolveTargetResult,
   type SessionEventLike,
   type SessionHeaderLike,
@@ -112,6 +122,23 @@ interface SessionService {
 interface SessionPersistenceService {
   list(signal?: AbortSignal): Promise<SessionHeader[]>
   inspect(id: string, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: readonly SessionEventLike[] }>
+}
+
+/** One mux stream frame: the rpcId that answers it plus its discriminated payload. */
+interface MuxFrameLike {
+  rpcId: unknown
+  payload: unknown
+}
+
+/**
+ * Minimal face of the optional `apiProxy` service (read via `ctx.get`). The
+ * bridge subscribes to the same all-session mux stream the web UI uses and
+ * answers pending questions through `respond`, so a profile without the
+ * gateway simply yields undefined and the ask-user path degrades to a no-op.
+ */
+interface ApiProxyLike {
+  events: { mux(request: unknown, signal: AbortSignal): AsyncIterable<MuxFrameLike> }
+  respond(envelope: QuestionAnswerEnvelope): Promise<{ accepted: boolean; reason?: string }>
 }
 
 /** Minimal face of one persisted projection-cache snapshot. */
@@ -301,11 +328,82 @@ export function apply(ctx: Context): void {
   /** Browser EventSource clients subscribed to the composer-draft push. */
   const sseClients = new Set<ServerResponse>()
 
+  /** Pending ask-user questions offered to Emacs, keyed by the mux rpcId. */
+  const pendingQuestions = new Map<string, { sessionId: string; questions: readonly AskUserQuestionItemLike[] }>()
+
   /** Write one SSE frame to every subscribed client, dropping dead ones. */
   function broadcast(frame: string): void {
     for (const client of [...sseClients]) {
       try { client.write(frame) } catch { sseClients.delete(client) }
     }
+  }
+
+  /** The mux rpcId for a question frame, as a plain string, or undefined. */
+  function rpcIdString(value: unknown): string | undefined {
+    return typeof value === 'string' ? value : undefined
+  }
+
+  /**
+   * Fold one mux stream frame into the pending-question registry and the
+   * Emacs SSE stream. A `question/requested` frame is stored (so a reconnect
+   * can replay it) and rebroadcast to Emacs; a `question/resolved` frame
+   * removes the entry and reports the outcome. Subagent-owned sessions are
+   * never surfaced (the asker blocks for a human answerer only at a root).
+   */
+  function handleMuxFrame(frame: MuxFrameLike): void {
+    const payload = frame.payload
+    const questionRequested = questionRequestedPayload(payload)
+    if (questionRequested !== null) {
+      const questionId = rpcIdString(frame.rpcId)
+      if (questionId === undefined) return
+      const session = sessions.list().find(s => String(s.id) === questionRequested.sessionId)
+      if (session === undefined) return
+      if (isSubagentChild(session.header.origin, ownedByLiveParent(session))) return
+      pendingQuestions.set(questionId, questionRequested)
+      broadcast(askUserMessage(questionId, questionRequested.sessionId, questionRequested.questions))
+      return
+    }
+    const questionResolved = questionResolvedPayload(payload)
+    if (questionResolved !== null) {
+      pendingQuestions.delete(questionResolved.questionRpcId)
+      broadcast(askUserResolvedMessage(
+        questionResolved.sessionId, questionResolved.questionRpcId, questionResolved.outcome))
+    }
+  }
+
+  /**
+   * Subscribe to the api-proxy mux stream in-process (the same stream the web
+   * UI's WebSocket downlinks read), so the bridge needs no loopback WebSocket
+   * client. Returns a disposer that aborts the subscription; a profile without
+   * the `apiProxy` service returns undefined and the ask-user path degrades.
+   */
+  function startMuxSubscription(): (() => void) | undefined {
+    const apiProxy = ctx.get('apiProxy') as ApiProxyLike | undefined
+    if (apiProxy === undefined) return undefined
+    const abort = new AbortController()
+    const task = (async () => {
+      while (!abort.signal.aborted) {
+        try {
+          for await (const frame of apiProxy.events.mux({}, abort.signal)) {
+            handleMuxFrame(frame)
+          }
+        } catch (error: unknown) {
+          // A live stream ending without an abort (gateway reset) warrants a
+          // reconnect; teardown aborts the signal and must stay quiet.
+          if (abort.signal.aborted) break
+          console.error(`dsh-bridge: mux stream errored: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (abort.signal.aborted) break
+        // The stream ended (or errored) without a teardown: reopen after a short
+        // pause. Reconnect re-subscribes to the mux, which replays still-pending
+        // questions, so Emacs re-learns any ask it may have missed.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 2000)
+          abort.signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+        })
+      }
+    })()
+    return () => { abort.abort() }
   }
 
   /** Loopback base URL of the web server the plugin is mounted on (the /api RPC carrier). */
@@ -711,6 +809,11 @@ export function apply(ctx: Context): void {
     return provided !== undefined && tokensEqual(token, provided)
   }
 
+  // Subscribe to the api-proxy mux stream (the ask-user feed). Wrapped in an
+  // effect so teardown aborts the subscription; a profile without `apiProxy`
+  // degrades the ask-user path to a no-op. Reconnect-on-emit keeps it live.
+  ctx.effect(() => startMuxSubscription() ?? (() => {}), 'dsh-bridge: mux subscription')
+
   // Registered inside an effect so a config hot-reload disposes the route
   // before re-applying — a duplicate (kind, path) registration throws.
   ctx.effect(() => webServer.register({
@@ -763,6 +866,13 @@ export function apply(ctx: Context): void {
         })
         res.write('retry: 5000\n\n')
         sseClients.add(res)
+        // Replay still-pending questions so a reconnecting Emacs re-learns an
+        // ask it may have missed (mirrors the mux's own replay to its clients).
+        for (const [questionId, pending] of pendingQuestions) {
+          try {
+            res.write(askUserMessage(questionId, pending.sessionId, pending.questions))
+          } catch { sseClients.delete(res); break }
+        }
         req.on('close', () => { sseClients.delete(res) })
         return
       }
@@ -777,6 +887,53 @@ export function apply(ctx: Context): void {
           sendJson(res, 200, { sessions: await listSessions() })
         } catch (error: unknown) {
           sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+        return
+      }
+
+      // Answer (or decline) a pending ask-user question the bridge surfaced to
+      // Emacs. Proxied to the api-proxy's `respond` so the awaiting tool call
+      // settles exactly as if the web UI had answered; first answer wins (a
+      // late/duplicate answer gets `accepted: false`).
+      if (req.method === 'POST' && pathname === '/dsh-bridge/answer') {
+        try {
+          const apiProxy = ctx.get('apiProxy') as ApiProxyLike | undefined
+          if (apiProxy === undefined) {
+            sendJson(res, 409, { accepted: false, reason: 'no api proxy' })
+            return
+          }
+          const body = (await readJson(req)) as {
+            questionId?: unknown; sessionId?: unknown; answers?: unknown; cancelled?: unknown
+          } | undefined
+          const questionId = typeof body?.questionId === 'string' ? body.questionId : undefined
+          const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined
+          if (questionId === undefined || sessionId === undefined) {
+            sendJson(res, 400, { accepted: false, reason: 'bad-response' })
+            return
+          }
+          const pending = pendingQuestions.get(questionId)
+          if (pending === undefined || pending.sessionId !== sessionId) {
+            sendJson(res, 404, { accepted: false, reason: 'not-pending' })
+            return
+          }
+          const isCancel = body.cancelled === true || body.cancelled === 'true'
+          const envelope = isCancel
+            ? questionCancelEnvelope(questionId)
+            : Array.isArray(body?.answers)
+              ? questionAnswerEnvelope(questionId, sessionId, body.answers)
+              : undefined
+          if (envelope === undefined) {
+            sendJson(res, 400, { accepted: false, reason: 'bad-response' })
+            return
+          }
+          const receipt = await apiProxy.respond(envelope)
+          if (receipt.accepted) {
+            pendingQuestions.delete(questionId)
+            broadcast(askUserResolvedMessage(sessionId, questionId, isCancel ? 'cancelled' : 'answered'))
+          }
+          sendJson(res, receipt.accepted ? 200 : 409, { accepted: receipt.accepted, reason: receipt.reason })
+        } catch (error: unknown) {
+          sendJson(res, bridgeErrorStatus(error), { error: error instanceof Error ? error.message : String(error) })
         }
         return
       }
