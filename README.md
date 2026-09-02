@@ -172,6 +172,23 @@ The following commands are available:
 * `l` — open the DSH-Sessions buffer.
 * `q` — quit the window and bury the buffer.
 
+The header line shows the session status glyph, the reply position, the
+session label, a refresh timestamp, the live context occupancy (`· N%`),
+and, while the shown session is running, an elapsed turn clock
+(`⏱ MM:SS`).  The latter two are "live turn" signals (see
+`dsh-bridge-view-elapsed-ticker`).  Turn boundaries are also announced in
+the echo area — `session "Label" is thinking…` on a turn start and the
+reason phrase on a turn end — for the session you are looking at; see
+`dsh-bridge-turn-boundary-echo`.
+
+A DSH-View buffer can **follow the latest turn**.  Pressing `M-n` at the
+newest reply turns on following (acting like "turn 0"): while the session
+runs, the buffer automatically refills to each newest committed reply and
+the header shows a small following marker.  Pressing `M-p` (or any manual
+reply navigation) leaves following and steps back through history.  A
+send-and-exit (`C-c C-c` in the DSH-Prompt buffer) pops to the DSH-View and
+turns on following for the sent session.
+
 If markdown-mode is installed, and `dsh-bridge-view-gfm` is non-nil,
 the reply is font-locked as GitHub-Flavored Markdown.
 
@@ -186,8 +203,11 @@ DSH-View buffer opens a prompt for the same session.
 The following commands are available from the DSH-Prompt buffer:
 
 * `C-c C-c` — send the region, or the whole buffer, as a prompt.  On
-  success, bury the buffer.
-* `C-c C-d` — push it to the DSH composer as a draft instead.
+  success, clear the buffer and pop to the DSH-View for that session in
+  turn-following state.  The sent text stays in the prompt history, so
+  `M-p` retrieves it.
+* `C-c C-d` — push it to the DSH composer as a draft instead.  On
+  success, clear the buffer (the composer now owns the text).
 * `C-c C-m` — set the model and reasoning effort.
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
