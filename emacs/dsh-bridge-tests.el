@@ -2540,8 +2540,10 @@ time is a no-op and an unknown id is ignored."
     (dsh-bridge--session-update-last-active "s2" 5)
     (should (null (dsh-bridge--session-for-id "s2")))))
 
-(ert-deftest dsh-bridge-user-looking-sessions-row ()
-  "The `message' turn-complete scope includes the sessions list's row at point."
+(ert-deftest dsh-bridge-user-looking-sessions-row-not ()
+  "Point on a row in the DSH-Sessions list is NOT \"looking\": a tabulated-list
+buffer is a navigation surface, and cursor position must not redirect the
+turn-boundary messages."
   (when (get-buffer "*dsh-bridge-output*") (kill-buffer "*dsh-bridge-output*"))
   (when (get-buffer "*dsh-bridge-prompt*") (kill-buffer "*dsh-bridge-prompt*"))
   (with-current-buffer (get-buffer-create "*dsh-bridge-sessions*")
@@ -2549,9 +2551,30 @@ time is a no-op and an unknown id is ignored."
     (let ((inhibit-read-only t))
       (insert (propertize "s1 row" 'tabulated-list-id "s1")))
     (goto-char (point-min))
-    (should (dsh-bridge--user-looking-p "s1"))
+    (should-not (dsh-bridge--user-looking-p "s1"))
     (should-not (dsh-bridge--user-looking-p "s2")))
   (kill-buffer "*dsh-bridge-sessions*"))
+
+(ert-deftest dsh-bridge-user-looking-view-displayed ()
+  "A DSH-View shows a session on-screen only when the buffer is displayed in a
+window; a hidden view showing the session does not count as \"looking\"."
+  (when (get-buffer "*dsh-bridge-output*") (kill-buffer "*dsh-bridge-output*"))
+  (when (get-buffer "*dsh-bridge-prompt*") (kill-buffer "*dsh-bridge-prompt*"))
+  (when (get-buffer "*dsh-bridge-sessions*") (kill-buffer "*dsh-bridge-sessions*"))
+  (let ((window (selected-window))
+        (previous (window-buffer (selected-window))))
+    (unwind-protect
+        (with-current-buffer (get-buffer-create "*dsh-bridge-output*")
+          (dsh-bridge-view-mode)
+          (setq-local dsh-bridge--view-content-session "s1")
+          ;; Hidden (not in a window): not looking.
+          (should-not (dsh-bridge--user-looking-p "s1"))
+          ;; Displayed in the selected window: looking.
+          (set-window-buffer window (current-buffer))
+          (should (dsh-bridge--user-looking-p "s1"))
+          (should-not (dsh-bridge--user-looking-p "s2")))
+      (set-window-buffer window previous)
+      (kill-buffer "*dsh-bridge-output*"))))
 
 ;;; Live turn feedback: turn-following state, elapsed ticker, boundary echo,
 ;;; blank-on-send, and the follow auto-refill.

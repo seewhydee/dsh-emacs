@@ -226,7 +226,9 @@ distracting."
   "Whether turn boundaries are announced in the echo area.
 When non-nil, a `turn-start' echoes \"session \\\"Label\\\" is thinking…\" and a
 `turn-complete' echoes the reason phrase, but only for a session the user is
-presently looking at (see `dsh-bridge--user-looking-p').  When nil, only the
+presently viewing (see `dsh-bridge--user-looking-p') — the DSH-View showing it
+on-screen, or the DSH-Prompt buffer bound to it.  Merely resting point on a row
+in the DSH-Sessions list does not count.  When nil, only the
 `dsh-bridge-turn-complete' `message' action announces a completion.  This is the
 Gnus-like \"something happened\" channel; it never pops a window."
   :type 'boolean
@@ -3812,6 +3814,14 @@ status/age cell on a row that does not move would otherwise never repaint."
 		 (and (eq major-mode 'dsh-bridge-view-mode)
 			  (equal dsh-bridge--view-content-session session-id)))))
 
+(defun dsh-bridge--view-displayed-p (session-id)
+  "Whether *dsh-bridge-output* is displaying SESSION-ID on-screen.
+Like `dsh-bridge--view-shown-session-p', but additionally requires the buffer
+to be shown in a window, so a hidden view does not count as \"the user is
+looking\"."
+  (and (dsh-bridge--view-shown-session-p session-id)
+	   (get-buffer-window "*dsh-bridge-output*")))
+
 (defun dsh-bridge--view-cycling-p ()
   "Whether the output buffer is currently mid M-p/M-n reply cycling."
   (and (buffer-live-p (get-buffer "*dsh-bridge-output*"))
@@ -3820,18 +3830,16 @@ status/age cell on a row that does not move would otherwise never repaint."
 			  dsh-bridge--view-replies-index))))
 
 (defun dsh-bridge--user-looking-p (session-id)
-  "Whether the user is looking at SESSION-ID: the output buffer shows it, a
-live prompt buffer follows it (its effective session is this session), or the
-sessions list has point on its row."
-  (or (dsh-bridge--view-shown-session-p session-id)
+  "Whether the user is looking at SESSION-ID: the DSH-View buffer is displaying
+it on-screen, or a live prompt buffer follows it (its effective session is this
+session).  Browsing the DSH-Sessions list and resting point on a row is NOT
+\"looking\" - a tabulated-list buffer is a navigation surface, and cursor
+position must not passively redirect turn-boundary messages."
+  (or (dsh-bridge--view-displayed-p session-id)
 	  (and (buffer-live-p (get-buffer "*dsh-bridge-prompt*"))
 		   (with-current-buffer "*dsh-bridge-prompt*"
 			 (and (eq major-mode 'dsh-bridge-prompt-mode)
-				  (equal (dsh-bridge--prompt-status-session) session-id))))
-	  (and (buffer-live-p (get-buffer "*dsh-bridge-sessions*"))
-		   (with-current-buffer "*dsh-bridge-sessions*"
-			 (and (eq major-mode 'dsh-bridge-sessions-mode)
-				  (equal (tabulated-list-get-id) session-id))))))
+				  (equal (dsh-bridge--prompt-status-session) session-id))))))
 
 (defun dsh-bridge--turn-reason-phrase (session-id reason)
   "A human phrase for SESSION-ID's completed turn given the REASON kind string."
