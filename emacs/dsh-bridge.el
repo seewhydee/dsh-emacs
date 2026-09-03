@@ -263,8 +263,7 @@ This is a cache for rendering last-active label and status indicators.
 ID is the session id that the running DeepSeek Harness (DSH) process
 resolved as last-active for a request without an explicit session.
 
-LABEL is the corresponding display label, taken from the response's
-`title' when present and from `dsh-bridge--session-label' otherwise.
+LABEL is the session display label; see `dsh-bridge--session-label'.
 Its value may be nil if the request is still incomplete.")
 
 (defvar dsh-bridge--view-content-session) ; forward declaration
@@ -1248,19 +1247,27 @@ buffer name or buffer, defaulting to the current buffer."
 	  (with-current-buffer buf
 		(setq default-directory (file-name-as-directory dir))))))
 
-(defun dsh-bridge--session-label (session)
+(defun dsh-bridge--session-label (session &optional no-default add-fallback-face)
   "Return the display label for SESSION.
 SESSION should be a string (a session ID), or a session data alist in
 the format described in `dsh-bridge--sessions-cache'.
 
-If the session has no title, fall back on the session ID.
-In case the session ID is invalid, return \"[Untitled Session]\"."
+If the session has no title, use the session ID as fallback.  As a final
+fallback, use \"[Untitled Session]\" unless NO-DEFAULT is supplied, in
+which case return nil.  If ADD-FALLBACK-FACE is non-nil, apply
+`dsh-bridge-untitled-face' as a face property for any fallback string."
   (let ((alist (if (stringp session)
 				   (dsh-bridge--session-for-id session)
-				 session))
-		(id (if (stringp session) session (alist-get 'id session))))
+				 session)))
 	(or (and alist (dsh-bridge--session-title alist))
-		id "[Untitled Session]")))
+		(let ((fallback (or (if (stringp session)
+								session
+							  (alist-get 'id session))
+							(unless no-default "[Untitled Session]"))))
+		  (and add-fallback-face (stringp fallback)
+			   (setq fallback
+					 (propertize fallback 'face 'dsh-bridge-untitled-face)))
+		  fallback))))
 
 (defun dsh-bridge--relative-age (ts &optional now)
   "Return a compact relative age string for ms-epoch timestamp TS.
@@ -1359,12 +1366,6 @@ the last-active session (as a fallback)."
 		  (concat " " status " " label)
 		label))))
 
-(defun dsh-bridge--session-choice (session)
-  "The completing-read candidate string for SESSION: title, else raw id.
-The raw id is unique, so untitled sessions never collide in completion."
-  (or (dsh-bridge--session-title session)
-	  (alist-get 'id session)))
-
 (defun dsh-bridge--session-annotation (session)
   "One-line completion annotation for SESSION: workspace, running, age."
   (let ((ts (or (alist-get 'lastActive session)
@@ -1432,8 +1433,8 @@ returns nil.  When several sessions share a title, a second completing-read
 resolves the collision.	 With no sessions and no PSEUDO-ENTRY, signals an
 error."
   (let* ((sessions (dsh-bridge--fetch-sessions))
-		 (choices (mapcar (lambda (s)
-							(cons (dsh-bridge--session-choice s) s))
+		 (choices (mapcar (lambda (s) ; return (LABEL . SESSION-DATA)
+							(cons (dsh-bridge--session-label s t) s))
 						  sessions))
 		 (all (append choices
 					  (and pseudo-entry (list (cons pseudo-entry nil)))))
@@ -1445,7 +1446,8 @@ error."
 		 ((equal label pseudo-entry) nil)
 		 (t (let ((matches (seq-filter
 							 (lambda (s)
-							   (equal (dsh-bridge--session-choice s) label))
+							   (equal (dsh-bridge--session-label s t)
+									  label))
 							 sessions)))
 			  (cond
 			   ((null matches) nil)
@@ -1959,7 +1961,7 @@ while `M-p'/'M-n' walk the prompt history (see
 `dsh-bridge--prompt-history-position')."
   (let* ((session (dsh-bridge--prompt-status-session))
 		 (status (dsh-bridge--status-glyph session))
-		 (label (or (and session (dsh-bridge--session-label session)) ""))
+		 (label (if session (dsh-bridge--session-label session) ""))
 		 (model (dsh-bridge--prompt-model-label session))
 		 (context (dsh-bridge--prompt-context-label session))
 		 (sent (dsh-bridge--prompt-sent-marker session))
@@ -3322,12 +3324,6 @@ target, else a space."
 	  (propertize "*" 'face 'dsh-bridge-default-target-face)
 	" "))
 
-(defun dsh-bridge--session-cell (session)
-  "Session name cell for SESSION, with untitled faces."
-  (let* ((title (dsh-bridge--session-title session))
-		 (label (or title (alist-get 'id session) "[Untitled Session]")))
-	(if title label (propertize label 'face 'dsh-bridge-untitled-face))))
-
 (defun dsh-bridge--age-sorter (a b)
   "Sort predicate for the Age column: ascending by activity timestamp.
 A and B are `tabulated-list' entries (ID COLS); the Age cell is a string
@@ -3359,7 +3355,7 @@ Archived sessions are hidden unless `dsh-bridge--sessions-archived-p' (or
 						   workspace))
 		 (cols (vector (dsh-bridge--default-target-marker session)
 					   (dsh-bridge--status-glyph (alist-get 'id session))
-					   (dsh-bridge--session-cell session)
+					   (dsh-bridge--session-label session nil t)
 					   age
 					   workspace-cell)))
 	(when dsh-bridge-show-session-ids

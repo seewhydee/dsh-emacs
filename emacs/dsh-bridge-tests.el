@@ -251,7 +251,25 @@ recorded."
     (should (equal (dsh-bridge--session-label nil) "[Untitled Session]"))
     ;; Session data alists are accepted directly (no cache lookup).
     (should (equal (dsh-bridge--session-label '((id . "s3") (title . "T3"))) "T3"))
-    (should (equal (dsh-bridge--session-label '((id . "s4"))) "s4"))))
+    (should (equal (dsh-bridge--session-label '((id . "s4"))) "s4"))
+    ;; NO-DEFAULT suppresses the \"[Untitled Session]\" final fallback, so an
+    ;; untitled alist with an id still labels as the id but one without an id
+    ;; (or no session at all) labels as nil: the completing-read candidate.  A
+    ;; real title still wins under NO-DEFAULT.
+    (should (equal (dsh-bridge--session-label '((id . "s4")) t) "s4"))
+    (should (equal (dsh-bridge--session-label '((id . "s7") (title . "T7")) t) "T7"))
+    (should (null (dsh-bridge--session-label '((cwd . "/x")) t)))
+    (should (null (dsh-bridge--session-label nil t)))
+    ;; ADD-FALLBACK-FACE marks only fallback labels (raw id / untitled), never
+    ;; a real title.
+    (should (eq (get-text-property
+                 0 'face (dsh-bridge--session-label '((id . "s5")) nil t))
+                'dsh-bridge-untitled-face))
+    (should (eq (get-text-property
+                 0 'face (dsh-bridge--session-label nil nil t))
+                'dsh-bridge-untitled-face))
+    (should-not (get-text-property
+                 0 'face (dsh-bridge--session-label '((id . "s6") (title . "T6")) nil t)))))
 
 (ert-deftest dsh-bridge-workspace-label ()
   "The workspace label is the title, else the cwd basename, else the cwd."
@@ -1231,13 +1249,19 @@ Emoji glyphs are double-width; in a one-column cell
         (should-not (get-text-property (1- (point)) 'display))))))
 
 (ert-deftest dsh-bridge-session-cell-untitled ()
-  "The session cell shows the title, or the raw id (untitled face) otherwise."
-  (let ((a '((id . "aaaaaa") (live . t) (cwd . "/x")))
+  "The session cell shows the title, or the raw id (untitled face) otherwise.
+The cell is `dsh-bridge--session-label' with the fallback-face argument."
+  (let ((dsh-bridge--session-status nil)
+        (a '((id . "aaaaaa") (live . t) (cwd . "/x")))
         (b '((id . "bbbbbb") (live . t) (title . "B"))))
-    (should (string= (dsh-bridge--session-cell a) "aaaaaa"))
-    (should (eq (get-text-property 0 'face (dsh-bridge--session-cell a))
-                'dsh-bridge-untitled-face))
-    (should (string= (dsh-bridge--session-cell b) "B"))))
+    ;; The Session column is index 2 of the entry's cell vector.
+    (let ((a-cell (aref (cadr (dsh-bridge--session-entry a)) 2))
+          (b-cell (aref (cadr (dsh-bridge--session-entry b)) 2)))
+      (should (string= a-cell "aaaaaa"))
+      (should (eq (get-text-property 0 'face a-cell)
+                  'dsh-bridge-untitled-face))
+      (should (string= b-cell "B"))
+      (should-not (get-text-property 0 'face b-cell)))))
 
 (ert-deftest dsh-bridge-list-sessions-shows-ids-when-enabled ()
   "With `dsh-bridge-show-session-ids' non-nil, an Id column appears."
