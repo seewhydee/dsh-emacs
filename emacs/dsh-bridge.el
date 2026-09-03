@@ -29,13 +29,16 @@
 ;; It is bundled with a plugin for DSH, which should be installed with
 ;; \\`M-x dsh-bridge-install-plugin' before using the other commands.
 
-;; BASIC USAGE:
-;;
+;; During plugin installation, we must run the `dsh' executable;
+;; customize `dsh-bridge-dsh-command' to specify how.  If this is nil
+;; (the default), the package tries to autodetect, but that may not
+;; work properly if `dsh' is installed in a non-standard location.
+
 ;; The interactive entry points are:
 ;;
 ;; `dsh-bridge'					  - transient dispatcher
 ;; `dsh-bridge-list-sessions'	  - browse DSH sessions
-;; Consider giving one of both of these a global keybinding.
+;; Consider giving one or both of these a global keybinding.
 ;;
 ;; \\`M-x dsh-bridge' opens a transient menu that prompts for the next
 ;; command, with the top line showing the session your next command
@@ -44,11 +47,11 @@
 ;;
 ;; \\`M-x dsh-bridge-list-sessions' opens a buffer with a tabulated
 ;; list of DSH sessions.  You can type \\`f' to fetch output, \\`r' to
-;; send reply, etc.
+;; compose a reply, etc.
 ;;
-;; From the DSH-View buffer, which shows assistant text fetched from
-;; DSH, type \\`r' to open a DSH-Prompt buffer, \\`M-p'/\\`M-n' to
-;; cycle through the session reply history, etc.
+;; The DSH-View buffer shows assistant text fetched from DSH.  From
+;; here, type \\`r' to compose a reply for the session,
+;; \\`M-p'/\\`M-n' to cycle through the reply history, etc.
 ;;
 ;; From the DSH-Prompt buffer, you can type out prompts for DSH and
 ;; send them with \\`C-c C-c', or send as draft with \\`C-c C-d'.
@@ -78,6 +81,26 @@ This should match the version reported by the running DSH plugin.")
 (defgroup dsh-bridge nil
   "Connect Emacs to a DeepSeek Harness session."
   :group 'tools)
+
+(defcustom dsh-bridge-dsh-command nil
+  "How the DeepSeek Harness process (dsh) is invoked.
+This variable is used only when installing (or uninstalling) the DSH
+plugin.  Its value can be one of the following:
+
+- nil (the default) does auto-detection.  The first available of these
+  is used: `dsh' on PATH, the npm global bin directory, or
+  `npx --yes @deepseek-ai/dsh'.
+
+- A single shell-style command, which is first processed with
+  `split-string-and-unquote' (which handles quotes and backslashes, but
+  does NOT expand ~).  Example: \"pnpm -C /path/to/deepseek-harness dsh\"
+
+- A list of strings: a command, followed by arguments, all handled
+  verbatim."
+  :type '(choice (const :tag "Auto-detect" nil)
+				 (string :tag "Command line (split shell-style)")
+				 (repeat :tag "Argv list (verbatim)" string))
+  :group 'dsh-bridge)
 
 (defcustom dsh-bridge-url "http://127.0.0.1:3080/dsh-bridge"
   "Base URL for the `dsh-emacs-bridge' HTTP route."
@@ -218,27 +241,6 @@ ask for confirmation first.
 This option does not affect \\`C-c C-d' (`dsh-bridge-draft')."
   :type 'boolean
   :group 'dsh-bridge)
-
-(defcustom dsh-bridge-dsh-command nil
-  "How the DeepSeek Harness process (dsh) is invoked.
-This variable is used only when installing (or uninstalling) the DSH
-plugin.  Its value can be one of the following:
-
-- nil (the default) does auto-detection.  The first available of these
-  is used: `dsh' on PATH, the npm global bin directory, or
-  `npx --yes @deepseek-ai/dsh'.
-
-- A single shell-style command, which is first processed with
-  `split-string-and-unquote' (which handles quotes and backslashes, but
-  does NOT expand ~).  Example: \"pnpm -C /path/to/deepseek-harness dsh\"
-
-- A list of strings: a command, followed by arguments, all handled
-  verbatim."
-  :type '(choice (const :tag "Auto-detect" nil)
-				 (string :tag "Command line (split shell-style)")
-				 (repeat :tag "Argv list (verbatim)" string))
-  :group 'dsh-bridge)
-
 
 ;;; Session tracking
 
@@ -550,25 +552,25 @@ question to ask.  Fall back to a message if no DSH is available."
 	(if (and (y-or-n-p (concat diagnosis "\n" question))
 			 ;; Extra confirmation if using npx
 			 (or (not (equal (car cmd) "npx"))
-				 (y-or-n-p "Running dsh via npx; this may involve a download, okay?")))
+				 (y-or-n-p "Running dsh via npx; this may download data.  Proceed?")))
 		(let ((dir (dsh-bridge--plugin-directory)))
 		  (cond
 		   ((null dir)
-			(error "dsh bridge: no bundled plugin found"))
+			(error "dsh-bridge: no bundled plugin found"))
 		   ((null cmd)
-			(error "dsh bridge: no DSH command found; set `dsh-bridge-dsh-command'."))
+			(error "dsh-bridge: no DSH command found; set `dsh-bridge-dsh-command'."))
 		   ((not (executable-find "pnpm"))
-			(error "dsh bridge: `pnpm' not found; try installing the plugin manually"))
+			(error "dsh-bridge: `pnpm' not found; try installing the plugin manually"))
 		   (t
 			(dsh-bridge--install-plugin-async dir))))
-	  (message "dsh bridge: plugin install aborted"))))
+	  (message "dsh-bridge: plugin install aborted"))))
 
 (defun dsh-bridge--ensure-plugin ()
   "Check for DSH bridge plugin availability, and maybe offer to install.
 This function is called at the top of every bridge request.  The plugin
 diagnosis runs only once per session; later commands proceed and surface
 an ordinary request error if the bridge is unavailable or incompatible."
-  (let ((state (or dsh-bridge--bridge-status-cache ; use cache, or do a probe
+  (let ((state (or dsh-bridge--bridge-status-cache ; use cache or do a probe
 				   (setq dsh-bridge--bridge-status-cache
 						 (dsh-bridge--bridge-status)))))
 	(cond
@@ -577,33 +579,36 @@ an ordinary request error if the bridge is unavailable or incompatible."
 	 (t
 	  (setq dsh-bridge--plugin-diagnosed t) ; bug user only once
 	  (cond
-	   ;; Plugin version mismatch (maybe DSH was not restarted after an upgrade).
+	   ;; Version mismatch (maybe DSH wasn't restarted after upgrade).
 	   ((eq state 'incompatible)
 		(dsh-bridge--offer-plugin-install
 		 "DSH plugin version mismatch."
-		 "Reinstall plugin? (If you already reinstalled, try restarting `dsh web'.)"))
+		 "Reinstall plugin? (If already installed, restart `dsh web'.)"))
 	   ((eq state 'forbidden)
-		(message "dsh bridge: status route refused the probe; check `dsh-bridge-url'"))
+		(display-warning :error
+		  "dsh-bridge: connection route forbidden; check `dsh-bridge-url'"))
 	   (t
 		(let ((profile-state (dsh-bridge--plugin-install-state)))
 		  (cond
 		   ;; Plugin installed but DSH unavailable.
 		   ((eq profile-state 'installed)
-			(if (eq state 'unreachable)
-				(message "dsh bridge: DSH not running at %s (plugin is installed)"
-						 dsh-bridge-url)
-			  (message "dsh bridge: DSH plugin installed but not loaded; restart `dsh web'")))
+			(let ((msg (concat "dsh-bridge: plugin installed, but "
+							   (if (eq state 'unreachable)
+								   (format "no bridge is running at %s"
+										   dsh-bridge-url)
+								 "not loaded; restart \"dsh web\""))))
+			  (display-warning :error msg)))
 		   ;; No plugin in the profile.  Offer an install only if
 		   ;; there is evidence that DSH exists; otherwise the npx
 		   ;; fallback would download DSH, which is beyond our remit.
 		   ((or (eq profile-state 'not-installed) (dsh-bridge--dsh-installed-p))
 			(dsh-bridge--offer-plugin-install
-			 (format "No DSH bridge plugin installed in profile %s." dsh-bridge-profile)
+			 (format "No DSH bridge plugin in profile \"%s\"." dsh-bridge-profile)
 			 "Install it now?"))
 		   (t
-			(message "dsh bridge: no DSH installation found"))))))))))
+			(user-error "dsh bridge: no DSH installation found"))))))))))
 
-;; Install and uninstall the DSH plugin
+;; Install or uninstall the DSH plugin
 
 (defun dsh-bridge--install-plugin (dir)
   "Install the bundled plugin at DIR into `dsh-bridge-profile'.
@@ -635,10 +640,10 @@ boot.  Returns nil when no `dsh' CLI is available."
   "Report the outcome of a plugin install.
 COMPOSED is whether the profile composition validated (`--dump-config')."
   (if composed
-	  (message "Installed dsh-emacs-bridge into the `%s' profile; restart \"dsh %s\" to load it"
+	  (message "DSH plugin installed to profile \"%s\"; please restart DSH"
 			   dsh-bridge-profile dsh-bridge-profile)
-	(message "Installed dsh-emacs-bridge into the `%s' profile, but the profile does not compose; run `M-x dsh-bridge-uninstall-plugin' and check the install"
-			 dsh-bridge-profile)))
+	(display-warning :error "Error installing DSH plugin; \
+run `M-x dsh-bridge-uninstall-plugin' and troubleshoot")))
 
 (defun dsh-bridge--plugin-install-finished ()
   "Post-install handling for the synchronous path: re-arm, validate, report."
@@ -672,7 +677,7 @@ rather than blocking Emacs in the install sentinel."
   "Sentinel for the asynchronous plugin install: chain into validation."
   (when (string-prefix-p "finished" event)
 	(if (not (zerop (process-exit-status process)))
-		(message "dsh bridge: plugin install failed; see the *dsh-bridge-install* buffer")
+		(message "dsh-bridge: plugin install failed; see the *dsh-bridge-install* buffer")
 	  (setq dsh-bridge--bridge-status-cache nil
 			dsh-bridge--plugin-diagnosed nil)
 	  (dsh-bridge--validate-plugin-install-async))))
@@ -730,7 +735,7 @@ plugin is not installed.
 Restart \"dsh web\" afterwards for the plugin to unload."
   (interactive)
   (if (not (eq (dsh-bridge--plugin-install-state) 'installed))
-	  (message "dsh bridge: no existing plugin installed")
+	  (message "dsh-bridge: no existing plugin installed")
 	(unless (dsh-bridge--dsh-command)
 	  (user-error "No `dsh' executable found; set `dsh-bridge-dsh-command'"))
 	(unless (executable-find "pnpm")
