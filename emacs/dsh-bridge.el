@@ -3010,7 +3010,7 @@ session and persists as the default, exactly as the web UI does."
         (if (null catalog)
             (message "dsh-bridge: no models available")
           (let ((chosen (completing-read
-                         "Model: "
+                         (format-prompt "Model" current-key)
                          (lambda (string pred action)
                            (if (eq action 'metadata)
                                `(metadata (annotation-function . ,annotation))
@@ -3032,7 +3032,7 @@ session and persists as the default, exactly as the web UI does."
                               (let ((d (alist-get 'defaultEffort reasoning)))
                                 (and d (car (rassoc d by-name)))))))
                     (setq effort
-                          (cdr (assoc (completing-read "Reasoning effort: "
+                          (cdr (assoc (completing-read (format-prompt "Reasoning effort" default-name)
                                                        (mapcar #'car by-name)
                                                        nil t nil nil default-name)
                                       by-name)))))
