@@ -1763,7 +1763,7 @@ a filled circle for an idle live session, a filled square for a running one,
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (dsh-bridge--ensure-plugin))
-    (should (string-match-p "not running" msg))))
+    (should (string-match-p "no bridge is running" msg))))
 
 (ert-deftest dsh-bridge-ensure-plugin-unreachable-not-installed ()
   "Unreachable + not installed still offers (installing needs no server)."
@@ -1786,19 +1786,19 @@ a filled circle for an idle live session, a filled square for a running one,
 This is the case the npx fallback must not paper over: downloading the
 whole CLI to install a plugin for a DSH the user never set up."
   (let ((dsh-bridge--bridge-status-cache nil) (dsh-bridge--plugin-diagnosed nil)
-        (offered nil) (msg nil)
+        (offered nil) (err-msg nil)
         (dsh-bridge-dsh-command nil))
     (cl-letf (((symbol-function 'dsh-bridge--bridge-status)
                (lambda () 'unreachable))
               ((symbol-function 'dsh-bridge--plugin-install-state) (lambda () 'no-profile))
               ((symbol-function 'dsh-bridge--dsh-installed-p) (lambda () nil))
               ((symbol-function 'y-or-n-p)
-               (lambda (&rest _) (setq offered t) nil))
-              ((symbol-function 'message)
-               (lambda (&rest args) (setq msg (apply #'format args)))))
-      (dsh-bridge--ensure-plugin))
+               (lambda (&rest _) (setq offered t) nil)))
+      (condition-case err
+          (dsh-bridge--ensure-plugin)
+        (user-error (setq err-msg (error-message-string err)))))
     (should-not offered)
-    (should (string-match-p "no DSH installation found" msg))))
+    (should (string-match-p "no DSH installation found" err-msg))))
 
 (ert-deftest dsh-bridge-ensure-plugin-no-profile-but-cli-offers ()
   "No profile but a real CLI (DSH exists, profile never created): offer."
@@ -1921,7 +1921,7 @@ whole CLI to install a plugin for a DSH the user never set up."
               ((symbol-function 'message)
                (lambda (&rest args) (setq msg (apply #'format args)))))
       (dsh-bridge--validate-sentinel 'fake-process "finished\n"))
-    (should (string-match-p "does not compose" msg))))
+    (should (string-match-p "uninstall-plugin" msg))))
 
 (ert-deftest dsh-bridge-uninstall-skips-when-not-installed ()
   "Uninstall pre-checks the manifest and skips pnpm otherwise."
@@ -2130,7 +2130,14 @@ prematurely; the payload is decoded only at the point of consumption."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert "opaque"))
-      (should (equal (dsh-bridge--view-reply-position) "")))))
+      (should (equal (dsh-bridge--view-reply-position) ""))
+      ;; Turn-following reads (latest/n), pinned to the newest reply.
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "newest"))
+      (setq-local dsh-bridge--view-follow t)
+      (should (equal (dsh-bridge--view-reply-position) " (latest/3)"))
+      (setq-local dsh-bridge--view-follow nil))))
 
 (ert-deftest dsh-bridge-view-header-provenance ()
   "The output header separates the session and time with `·', for both fetches

@@ -641,7 +641,7 @@ boot.  Returns nil when no `dsh' CLI is available."
 COMPOSED is whether the profile composition validated (`--dump-config')."
   (if composed
 	  (message "DSH plugin installed to profile \"%s\"; please restart DSH"
-			   dsh-bridge-profile dsh-bridge-profile)
+			   dsh-bridge-profile)
 	(display-warning :error "Error installing DSH plugin; \
 run `M-x dsh-bridge-uninstall-plugin' and troubleshoot")))
 
@@ -1262,8 +1262,8 @@ In case the session ID is invalid, return \"[Untitled Session]\"."
 
 (defun dsh-bridge--relative-age (ts &optional now)
   "Return a compact relative age string for ms-epoch timestamp TS.
-Matches DSH's own session rows (\"now\", \"5min\", \"3h\", \"2d\", \"4mo\",
-\"1y\").  NOW is the reference time in seconds (default: the current time)."
+Matches DSH conventions (\"now\", \"5min\", \"3h\", \"2d\", \"4mo\", \"1y\").
+NOW is the reference time in seconds (default: the current time)."
   (let* ((now (or now (float-time)))
 		 (secs (max 0 (- now (/ ts 1000.0)))))
 	(cond
@@ -1762,19 +1762,23 @@ newest reply, or a send-and-exit, sets it.")
 Newest-first, 1-indexed: `(1/n)' is the latest reply, `(n/n)' the oldest.
 While `M-p'/'M-n' cycle, k is the tracked index; at rest, k is the position of
 the shown text in the session's reply list (a fetched reply is normally 1).
-Reads the replies cache only — no synchronous I/O in a display path.  Omits
-the indicator when the text cannot be located (e.g. a pushed message whose
-exact text is not a reply)."
+In turn-following state the segment reads `(latest/n)' instead, since the view
+is pinned to the newest reply.  Reads the replies cache only — no synchronous
+I/O in a display path.  Omits the indicator when the text cannot be located
+(e.g. a pushed message whose exact text is not a reply)."
   (let ((session dsh-bridge--view-content-session))
 	(if (and session (cdr (assoc session dsh-bridge--replies-cache)))
 		(let* ((replies (cdr (assoc session dsh-bridge--replies-cache)))
-			   (k (cond
-				   (dsh-bridge--view-replies-index
-					(1+ dsh-bridge--view-replies-index))
-				   (t (let ((idx (dsh-bridge--view-reply-index
-								  replies (buffer-string))))
-						(and idx (1+ idx)))))))
-		  (if k (format " (%d/%d)" k (length replies)) ""))
+			   (n (length replies)))
+		  (if dsh-bridge--view-follow
+			  (format " (latest/%d)" n)
+			(let ((k (cond
+					  (dsh-bridge--view-replies-index
+					   (1+ dsh-bridge--view-replies-index))
+					  (t (let ((idx (dsh-bridge--view-reply-index
+									replies (buffer-string))))
+						   (and idx (1+ idx)))))))
+			  (if k (format " (%d/%d)" k n) ""))))
 	  "")))
 
 (defun dsh-bridge--view-elapsed-label (session-id)
