@@ -365,38 +365,11 @@ sent *from* it; a draft from any other buffer leaves unsent prompt text alone."
         (call-interactively #'dsh-bridge-send)))
     (should (equal (cdr (assoc 'text captured)) "region after"))))
 
-(ert-deftest dsh-bridge-send-whole-buffer-confirms ()
-  "A whole-buffer send asks y-or-n-p first and proceeds when confirmed."
+(ert-deftest dsh-bridge-send-whole-buffer-no-confirm ()
+  "A whole-buffer send proceeds without asking for confirmation."
   (let ((asked nil) captured)
     (with-temp-buffer
       (insert "whole")
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path payload _callback)
-                   (setq captured payload)))
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (setq asked t) t)))
-        (dsh-bridge-send)))
-    (should asked)
-    (should (equal (cdr (assoc 'text captured)) "whole"))))
-
-(ert-deftest dsh-bridge-send-whole-buffer-aborts-on-no ()
-  "Declining the whole-buffer confirmation sends nothing."
-  (let (captured)
-    (with-temp-buffer
-      (insert "whole")
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (_method _path payload _callback)
-                   (setq captured payload)))
-                ((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
-        (condition-case nil (dsh-bridge-send) (error nil))))
-    (should (null captured))))
-
-(ert-deftest dsh-bridge-send-prompt-buffer-exempt-from-guard ()
-  "In the prompt buffer, sending the whole buffer is the point: no guard."
-  (let ((asked nil) captured)
-    (with-temp-buffer
-      (dsh-bridge-prompt-mode)
-      (insert "prompt text")
       (cl-letf (((symbol-function 'dsh-bridge--call)
                  (lambda (_method _path payload _callback)
                    (setq captured payload)))
@@ -404,7 +377,7 @@ sent *from* it; a draft from any other buffer leaves unsent prompt text alone."
                  (lambda (&rest _) (setq asked t) t)))
         (dsh-bridge-send)))
     (should (null asked))
-    (should (equal (cdr (assoc 'text captured)) "prompt text"))))
+    (should (equal (cdr (assoc 'text captured)) "whole"))))
 
 (ert-deftest dsh-bridge-draft-whole-buffer-confirms ()
   "A whole-buffer draft asks y-or-n-p first (guard symmetry with send)."
@@ -419,17 +392,6 @@ sent *from* it; a draft from any other buffer leaves unsent prompt text alone."
         (dsh-bridge-draft)))
     (should asked)
     (should (equal (cdr (assoc 'text captured)) "whole"))))
-
-(ert-deftest dsh-bridge-send-read-only-no-region-refuses ()
-  "Sending from a read-only buffer without a region refuses."
-  (let ((sent nil))
-    (with-temp-buffer
-      (insert "content")
-      (dsh-bridge-view-mode)
-      (cl-letf (((symbol-function 'dsh-bridge--call)
-                 (lambda (&rest _) (setq sent t))))
-        (condition-case nil (dsh-bridge-send) (error nil)))
-      (should (null sent)))))
 
 (ert-deftest dsh-bridge-send-active-region-in-read-only-works ()
   "A region in a read-only buffer is sendable."
@@ -498,7 +460,8 @@ current buffer has no session of its own."
         (should (eq major-mode 'dsh-bridge-view-mode))
         (should buffer-read-only)
         (should (string-match-p " s1" (format "%s" header-line-format)))
-        (should (string-match-p "· " (format "%s" header-line-format)))))))
+        (should (string-match-p "· " (format "%s" header-line-format)))))
+    (kill-buffer "*dsh-bridge-output*")))
 
 (ert-deftest dsh-bridge-fetch-peek-labels-content-session ()
   "A peek/override fetch labels the output buffer with the content's session,
@@ -516,7 +479,8 @@ not the default target."
       (should (equal (buffer-string) "other reply"))
       (should (string-match-p " s2" (format "%s" header-line-format)))
       (should-not (string-match-p " s1" (format "%s" header-line-format)))
-      (should-not (string-match-p "target:" (format "%s" header-line-format))))))
+      (should-not (string-match-p "target:" (format "%s" header-line-format))))
+    (kill-buffer "*dsh-bridge-output*")))
 
 (ert-deftest dsh-bridge-fetch-seeds-status ()
   "Fetch seeds the tracker from /output's running flag: true -> running,
@@ -535,7 +499,8 @@ a `running:false' session used to be seeded `running' and show amber)."
                 ((symbol-function 'dsh-bridge--request)
                  (lambda (&rest _) (cons nil nil))))
         (dsh-bridge-fetch "s1"))
-      (should (eq (dsh-bridge--status-state "s1") (cdr case))))))
+      (should (eq (dsh-bridge--status-state "s1") (cdr case)))
+      (kill-buffer "*dsh-bridge-output*"))))
 
 (ert-deftest dsh-bridge-apply-session-directory ()
   "The helper sets default-directory (trailing slash), with cache fallback."
@@ -563,7 +528,8 @@ a `running:false' session used to be seeded `running' and show amber)."
                (lambda (&rest _) (cons nil nil))))
       (dsh-bridge-fetch))
     (with-current-buffer "*dsh-bridge-output*"
-      (should (equal default-directory "/w/sess1/")))))
+      (should (equal default-directory "/w/sess1/")))
+    (kill-buffer "*dsh-bridge-output*"))))
 
 ;;; The prompt buffer: session binding, header, history
 
@@ -653,33 +619,36 @@ binds the compose keys plus fetch/set-session/list."
       (should (equal dsh-bridge--prompt-session "live-1")))))
 
 (ert-deftest dsh-bridge-prompt-history-navigation ()
-  "M-p/M-n cycle the prompt buffer through the cached session history."
+  "M-p/M-n cycle the prompt buffer through the session's prompt history."
   (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
-      (setq-local dsh-bridge--prompt-history-session "s1")
-      (setq dsh-bridge--prompt-history '(("s1" "third" "second" "first")))
-      (insert "my draft")
-      ;; M-p: newest prompt, draft saved.
-      (dsh-bridge-prompt-previous-history)
-      (should (equal (buffer-string) "third"))
-      (should (equal dsh-bridge--prompt-draft "my draft"))
-      (should (equal dsh-bridge--prompt-history-index 0))
-      ;; M-p again: older, then oldest, then stays.
-      (dsh-bridge-prompt-previous-history)
-      (should (equal (buffer-string) "second"))
-      (dsh-bridge-prompt-previous-history)
-      (should (equal (buffer-string) "first"))
-      (dsh-bridge-prompt-previous-history)
-      (should (equal (buffer-string) "first"))
-      ;; M-n walks back to the newest, then restores the draft.
-      (dsh-bridge-prompt-next-history)
-      (should (equal (buffer-string) "second"))
-      (dsh-bridge-prompt-next-history)
-      (should (equal (buffer-string) "third"))
-      (dsh-bridge-prompt-next-history)
-      (should (equal (buffer-string) "my draft"))
-      (should (null dsh-bridge--prompt-history-index)))))
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (_method _path _payload)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'prompts
+                                         (list "third" "second" "first")))))))
+        (insert "my draft")
+        ;; M-p: newest prompt, draft saved.
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "third"))
+        (should (equal dsh-bridge--prompt-draft "my draft"))
+        (should (equal dsh-bridge--prompt-history-index 0))
+        ;; M-p again: older, then oldest, then stays.
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "second"))
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "first"))
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "first"))
+        ;; M-n walks back to the newest, then restores the draft.
+        (dsh-bridge-prompt-next-history)
+        (should (equal (buffer-string) "second"))
+        (dsh-bridge-prompt-next-history)
+        (should (equal (buffer-string) "third"))
+        (dsh-bridge-prompt-next-history)
+        (should (equal (buffer-string) "my draft"))
+        (should (null dsh-bridge--prompt-history-index))))))
 
 (ert-deftest dsh-bridge-prompt-history-fetches ()
   "M-p fetches the effective session's prompts from the host when not cached."
@@ -698,16 +667,18 @@ binds the compose keys plus fetch/set-session/list."
                      (list "new" "old"))))))
 
 (ert-deftest dsh-bridge-prompt-history-no-prompts ()
-  "M-p with no cached prompts reports it and leaves the buffer untouched."
+  "M-p with an empty session history reports it and leaves the buffer alone."
   (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
-      (setq-local dsh-bridge--prompt-history-session "s1")
-      (setq dsh-bridge--prompt-history '(("s1")))
-      (insert "draft")
-      (dsh-bridge-prompt-previous-history)
-      (should (equal (buffer-string) "draft"))
-      (should (null dsh-bridge--prompt-history-index)))))
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (_method _path _payload)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'prompts '()))))))
+        (insert "draft")
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "draft"))
+        (should (null dsh-bridge--prompt-history-index))))))
 
 (ert-deftest dsh-bridge-prompt-history-record-send ()
   "A recorded send prepends the text and returns the buffer to the draft slot."
@@ -717,7 +688,7 @@ binds the compose keys plus fetch/set-session/list."
   (let ((buf (get-buffer-create "*dsh-bridge-prompt*")))
     (with-current-buffer buf
       (dsh-bridge-prompt-mode)
-      (setq-local dsh-bridge--prompt-history-session "s1")
+      (setq-local dsh-bridge--prompt-session "s1")
       (setq-local dsh-bridge--prompt-history-index 1))
     (dsh-bridge--prompt-history-record-send "s1" "just sent")
     (should (equal (cdr (assoc "s1" dsh-bridge--prompt-history))
@@ -725,6 +696,46 @@ binds the compose keys plus fetch/set-session/list."
     (with-current-buffer buf
       (should (null dsh-bridge--prompt-history-index)))
     (kill-buffer buf)))
+
+(ert-deftest dsh-bridge-prompt-history-edited-blocks-walk ()
+  "Editing a history entry blocks walking until it is sent or reverted."
+  (let ((dsh-bridge-default-session "s1"))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (_m _p _pl)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'prompts (list "new" "old")))))))
+        (insert "draft")
+        (dsh-bridge-prompt-previous-history)
+        (insert " edited")
+        (dsh-bridge-prompt-previous-history)
+        (should (equal (buffer-string) "new edited"))
+        (dsh-bridge-prompt-next-history)
+        (should (equal (buffer-string) "new edited"))))))
+
+(ert-deftest dsh-bridge-prompt-revert-history ()
+  "`revert-buffer' restores an edited history entry, or returns to the
+draft when the entry shown is pristine."
+  (let ((dsh-bridge-default-session "s1"))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (should (eq revert-buffer-function #'dsh-bridge--revert-prompt-buffer))
+      (cl-letf (((symbol-function 'dsh-bridge--request)
+                 (lambda (_m _p _pl)
+                   (cons 200 (list (cons 'sessionId "s1")
+                                   (cons 'prompts (list "new" "old")))))))
+        (insert "my draft")
+        (dsh-bridge-prompt-previous-history)
+        ;; Edited entry: revert restores the pristine text.
+        (insert " edited")
+        (revert-buffer nil t)
+        (should (equal (buffer-string) "new"))
+        (should (equal dsh-bridge--prompt-history-index 0))
+        ;; Pristine entry: revert returns to the draft.
+        (revert-buffer nil t)
+        (should (equal (buffer-string) "my draft"))
+        (should (null dsh-bridge--prompt-history-index))))))
 
 (ert-deftest dsh-bridge-send-text-records-history ()
   "A successful send records the prompt into the session history cache."
@@ -1042,7 +1053,8 @@ the anchor at the newest."
       (with-current-buffer "*dsh-bridge-output*"
         (should (equal (buffer-string) "fresh"))
         (should (null dsh-bridge--view-replies-index))
-        (should (null dsh-bridge--view-replies-anchor))))))
+        (should (null dsh-bridge--view-replies-anchor)))
+      (kill-buffer "*dsh-bridge-output*"))))
 
 ;;; The sessions list
 
@@ -2205,13 +2217,30 @@ and pushed messages."
       (insert "hello!")
       (should (equal (dsh-bridge--prompt-sent-marker "s1") "")))))
 
-(ert-deftest dsh-bridge-resend-guard ()
-  "The resend guard fires only for an identical re-send to the same session."
-  (let ((dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0)))))
-    (should (dsh-bridge--resend-guard-p "s1" "hello"))
-    (should-not (dsh-bridge--resend-guard-p "s1" "hello!"))
-    (should-not (dsh-bridge--resend-guard-p "s2" "hello"))
-    (should-not (dsh-bridge--resend-guard-p nil "hello"))))
+(ert-deftest dsh-bridge-send-and-exit-resend-guard ()
+  "C-c C-c confirms before an identical re-send to the same session;
+declining aborts, and edited text sends without asking."
+  (let ((dsh-bridge-prompt-resend-confirm t)
+        (dsh-bridge--last-sent '(("s1" . ("hello" . 1234567.0))))
+        (asked nil) (sent nil))
+    (with-temp-buffer
+      (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
+      (cl-letf (((symbol-function 'dsh-bridge-send-text)
+                 (lambda (text &rest _) (setq sent text)))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (setq asked t) nil)))
+        ;; Identical text: the guard fires; declining aborts the send.
+        (insert "hello")
+        (should-error (dsh-bridge-send-and-exit) :type 'user-error)
+        (should asked)
+        (should (null sent))
+        ;; Edited text: no guard, sends.
+        (setq asked nil)
+        (insert "!")
+        (dsh-bridge-send-and-exit)
+        (should (null asked))
+        (should (equal sent "hello!"))))))
 
 (ert-deftest dsh-bridge-turn-reason-phrase ()
   "The turn-end reason kind maps to a truthful human verb."
@@ -2544,7 +2573,7 @@ leaves the buffer and index untouched."
   "The prompt-history position is newest-first (k/n), absent at rest."
   (with-temp-buffer
     (dsh-bridge-prompt-mode)
-    (setq-local dsh-bridge--prompt-history-session "s1")
+    (setq-local dsh-bridge--prompt-session "s1")
     (setq dsh-bridge--prompt-history '(("s1" "new" "mid" "old")))
     (setq-local dsh-bridge--prompt-history-index nil)
     (should (equal (dsh-bridge--prompt-history-position) ""))

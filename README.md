@@ -202,17 +202,19 @@ DSH-View buffer opens a prompt for the same session.
 
 The following commands are available from the DSH-Prompt buffer:
 
-* `C-c C-c` — send the region, or the whole buffer, as a prompt.  On
-  success, clear the buffer and pop to the DSH-View for that session in
-  turn-following state.  The sent text stays in the prompt history, so
-  `M-p` retrieves it.
+* `C-c C-c` — send the whole buffer as a prompt (an active region is
+  ignored, as in Message mode).  On success, clear the buffer and pop to
+  the DSH-View for that session in turn-following state.  The sent text
+  stays in the prompt history, so `M-p` retrieves it.
 * `C-c C-d` — push it to the DSH composer as a draft instead.  On
   success, clear the buffer (the composer now owns the text).
 * `C-c C-m` — set the model and reasoning effort.
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
-* `M-p` / `M-n` — walk the session's prompt history.
+* `M-p` / `M-n` — walk the session's prompt history.  An edited history
+  entry must be sent or reverted (`M-x revert-buffer`) before walking
+  on; reverting a pristine entry returns to the draft.
 
 When `markdown-mode` is installed, this buffer derives from it, so
 most markdown editing commands are also available.

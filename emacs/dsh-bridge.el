@@ -1483,11 +1483,17 @@ Advisory display cache only (see `dsh-bridge--last-resolved-active')."
 
 ;;; Prompt history
 
+;; The prompt history functionality is tied to DSH-Prompt buffers, for
+;; which the buffer-local variable `dsh-bridge--prompt-session' tracks
+;; the DSH session.  By default, there is one global DSH-Prompt buffer
+;; (*dsh-bridge-prompt*), but we try to ensure things work even if the
+;; user sets up multiple buffers (e.g., by renaming).
+
 (defvar dsh-bridge--prompt-history nil
-  "Alist of (SESSION-ID . PROMPTS) for the prompt buffer's history.
-PROMPTS is a list of prompt strings, newest first. The authoritative
-list is fetched from the bridge; after sending a prompt, the entry is
-prepended locally so it is available without a refetch.")
+  "Alist of (SESSION-ID . PROMPTS) for DSH prompt history.
+PROMPTS is a list of prompt strings, newest first.  This is a local
+cache for the authoritative DSH-side history; each entry is updated when
+`dsh-bridge--prompt-history-refresh' is called for that session.")
 
 (defvar dsh-bridge--last-sent nil
   "Alist of (SESSION-ID . (TEXT . TS)) for the most recent prompt send.
@@ -1496,117 +1502,167 @@ variable is updated by `dsh-bridge--prompt-history-record-send', and
 used by the prompt header and the resend guard.  Drafts are not
 recorded, so the guard never mistakes a draft push for a resend.")
 
-(defvar-local dsh-bridge--prompt-history-session nil
-  "Session id the prompt buffer's history refers to, or nil.")
+;; Prompt history is tracked with three buffer-local variables.
+;; Whenever `dsh-bridge--prompt-session' is reset, they must be reset.
 
 (defvar-local dsh-bridge--prompt-history-index nil
-  "Index into the current session's prompt list shown in the prompt buffer.
-A nil value means the buffer holds a draft (most recent content); 0 is
-the newest prompt.")
+  "Index into the current buffer's prompt list (newest first).
+A nil value means the buffer holds a draft (i.e., not history).")
 
 (defvar-local dsh-bridge--prompt-draft nil
-  "The unsent buffer content saved when browsing prompt history, or nil.")
+  "Unsent buffer content saved when browsing prompt history, or nil.")
 
-(defun dsh-bridge--prompt-history-list ()
-  "Return the cached prompt list (newest first) for the history session."
-  (and dsh-bridge--prompt-history-session
-	   (cdr (assoc dsh-bridge--prompt-history-session dsh-bridge--prompt-history))))
+(defvar-local dsh-bridge--prompt-history-session nil
+  "Session id keying this buffer's prompt history walk, or nil.
+Set by `dsh-bridge--prompt-history-refresh' to the id returned by the
+host.  Only needed when `dsh-bridge--prompt-session' is nil.")
+
+(defun dsh-bridge--get-prompt-history ()
+  "Return the list of prompts for the current buffer's session, or nil."
+  (cdr (assoc (or dsh-bridge--prompt-session
+				  dsh-bridge--prompt-history-session)
+			  dsh-bridge--prompt-history)))
 
 (defun dsh-bridge--prompt-history-position ()
-  "Position string \" (k/n)\" for the prompt-history walk, or \"\" at rest.
-Newest-first, 1-indexed (`(1/n)' is the newest).  Rendered only while
-`dsh-bridge--prompt-history-index' is non-nil, mirroring the DSH-View buffer's
-reply-position segment.  Reads the buffer-local index and the cached list; no
-I/O in a display path."
+  "Return the indicator string \" (k/n)\" for the prompt history.
+Newest-first, 1-indexed (`(1/n)' is the newest).  This function uses the
+buffer-local index and the cached list; no I/O."
   (let ((list (and dsh-bridge--prompt-history-index
-				   (dsh-bridge--prompt-history-list))))
+				   (dsh-bridge--get-prompt-history))))
 	(if list
 		(format " (%d/%d)" (1+ dsh-bridge--prompt-history-index) (length list))
 	  "")))
 
 (defun dsh-bridge--prompt-history-refresh ()
-  "Return the prompt list (newest first) for the prompt buffer's effective session.
-Fetches `GET /prompts' when the buffer is not already browsing a history for
-that session: on first use, when the binding changed, or while the buffer
-follows the default target/last-active (which may have moved).	Within an
-ongoing navigation the cached list is reused, so `M-p'/`M-n' browse a stable
-list."
-  (when (null dsh-bridge--prompt-history-index)
-	(let ((effective (dsh-bridge--effective-session)))
-	  (when (or (null dsh-bridge--prompt-history-session)
-				(not (equal effective dsh-bridge--prompt-history-session)))
-		(let* ((path (dsh-bridge--path "/prompts" effective))
-			   (result (dsh-bridge--request "GET" path nil))
-			   (alist (cdr result))
-			   (session-id (and alist (alist-get 'sessionId alist))))
-		  (when session-id
-			(setq dsh-bridge--prompt-history
-				  (assoc-delete-all session-id dsh-bridge--prompt-history))
-			(push (cons session-id (or (alist-get 'prompts alist) '()))
-				  dsh-bridge--prompt-history)
-			(setq-local dsh-bridge--prompt-history-session session-id)
-			(setq-local dsh-bridge--prompt-draft nil))))))
-  (dsh-bridge--prompt-history-list))
+  "Fetch the prompt history for this DSH-Prompt buffer.
+Always fetches `GET /prompts' for the effective session; callers skip
+the fetch while browsing, so \\`M-p' and \\`M-n' walk a stable list.  The
+fetched list is cached in `dsh-bridge--prompt-history' under the session
+id returned by the host; when the buffer follows the default target,
+that id is also recorded in `dsh-bridge--prompt-history-session'."
+  (let* ((path (dsh-bridge--path "/prompts" (dsh-bridge--effective-session)))
+		 (result (dsh-bridge--request "GET" path nil))
+		 (alist (cdr result))
+		 (session-id (and alist (alist-get 'sessionId alist))))
+	(unless session-id
+	  (error "dsh-bridge: could not fetch prompt history"))
+	;; Inject fetched history into `dsh-bridge--prompt-history'.
+	(setq dsh-bridge--prompt-history
+		  (cons (cons session-id (or (alist-get 'prompts alist) '()))
+				(assoc-delete-all session-id dsh-bridge--prompt-history)))
+	(unless dsh-bridge--prompt-session
+	  (setq-local dsh-bridge--prompt-history-session session-id))))
 
-(defun dsh-bridge--prompt-show-history (text)
-  "Replace the prompt buffer's content with TEXT, point at the end."
+(defun dsh-bridge--prompt-show-history ()
+  "Replace buffer contents from the prompt history.
+Pick the prompt entry indexed by `dsh-bridge--prompt-history-index',
+using `dsh-bridge--prompt-history' and this DSH-Prompt buffer's session.
+If the index is nil, insert `dsh-bridge--prompt-draft' instead."
   (erase-buffer)
-  (insert text)
+  (cond
+   (dsh-bridge--prompt-history-index
+	(insert (nth dsh-bridge--prompt-history-index
+				 (dsh-bridge--get-prompt-history)))
+	(set-buffer-modified-p nil)) ; set unmodified if walking history
+   (dsh-bridge--prompt-draft
+	(insert dsh-bridge--prompt-draft))) ; this sets the modified flag
   (goto-char (point-max)))
 
 (defun dsh-bridge-prompt-previous-history ()
-  "Replace the prompt buffer with the previous prompt sent to the target session.
-The current (unsent) content is saved so `dsh-bridge-prompt-next-history' can
-restore it; `M-n' walks back toward the draft."
+  "Move backward through the DSH prompt history.
+Replace the prompt in the current buffer with the previous prompt for
+the current DSH session.  If the buffer has existing non-history
+contents, stash it in `dsh-bridge--prompt-draft', so that a future
+`dsh-bridge-prompt-next-history' can restore it."
   (interactive)
-  (let ((prompts (dsh-bridge--prompt-history-refresh)))
-	(if (null prompts)
-		(message "dsh-bridge: no prompts in this session's history")
-	  (if (null dsh-bridge--prompt-history-index)
-		  (progn
-			(setq-local dsh-bridge--prompt-draft (buffer-string))
-			(setq-local dsh-bridge--prompt-history-index 0)
-			(dsh-bridge--prompt-show-history (car prompts)))
-		(let ((next (1+ dsh-bridge--prompt-history-index)))
-		  (if (>= next (length prompts))
-			  (message "dsh-bridge: at the oldest prompt")
-			(setq-local dsh-bridge--prompt-history-index next)
-			(dsh-bridge--prompt-show-history (nth next prompts))))))))
+  (unless (eq major-mode 'dsh-bridge-prompt-mode)
+	(user-error "Not in a DSH-Prompt buffer"))
+  ;; Refetch prompt history if we were composing a draft (i.e., not
+  ;; just walking history).
+  (unless dsh-bridge--prompt-history-index
+	(dsh-bridge--prompt-history-refresh))
+  (let ((prompts (dsh-bridge--get-prompt-history)))
+	(cond
+	 ((null prompts)
+	  (message "dsh-bridge: no earlier prompts in this session"))
+	 ;; Stash the draft.
+	 ((null dsh-bridge--prompt-history-index)
+	  (setq-local dsh-bridge--prompt-draft (buffer-string))
+	  (setq-local dsh-bridge--prompt-history-index 0)
+	  (dsh-bridge--prompt-show-history))
+	 ;; If we edited a history prompt, disallow walking to avoid
+	 ;; losing data.
+	 ((buffer-modified-p)
+	  (message
+	   (substitute-command-keys
+		"dsh-bridge: prompt history edited; \
+send or `\\[revert-buffer]' first")))
+	 ((>= dsh-bridge--prompt-history-index (1- (length prompts)))
+	  (message "dsh-bridge: no earlier prompts in this session"))
+	 (t
+	  (setq-local dsh-bridge--prompt-history-index
+				  (1+ dsh-bridge--prompt-history-index))
+	  (dsh-bridge--prompt-show-history)))))
 
 (defun dsh-bridge-prompt-next-history ()
-  "Move the prompt buffer forward through the session's prompt history.
-At the newest prompt, restore the draft saved by
-`dsh-bridge-prompt-previous-history'."
+  "Move forward through the DSH prompt history.
+After crossing the most recent historical prompt, restore the draft
+stashed in `dsh-bridge-prompt-previous-history'."
   (interactive)
-  (if (null dsh-bridge--prompt-history-index)
-	  (message "dsh-bridge: no newer prompts")
-	(if (zerop dsh-bridge--prompt-history-index)
-		(progn
-		  (setq-local dsh-bridge--prompt-history-index nil)
-		  (dsh-bridge--prompt-show-history (or dsh-bridge--prompt-draft "")))
-	  (let ((index (1- dsh-bridge--prompt-history-index)))
-		(setq-local dsh-bridge--prompt-history-index index)
-		(dsh-bridge--prompt-show-history
-		 (nth index (dsh-bridge--prompt-history-list)))))))
+  (cond
+   ((not (eq major-mode 'dsh-bridge-prompt-mode))
+	(user-error "Not in a DSH-Prompt buffer"))
+   ((null dsh-bridge--prompt-history-index)
+	(message "dsh-bridge: no newer prompts"))
+   ;; If we edited a history prompt, disallow walking.
+   ((buffer-modified-p)
+	(message
+     (substitute-command-keys
+	  "dsh-bridge: prompt history edited; send or `\\[revert-buffer]' first")))
+   (t
+	(setq-local dsh-bridge--prompt-history-index
+				(if (zerop dsh-bridge--prompt-history-index)
+					nil
+				  (1- dsh-bridge--prompt-history-index)))
+	(dsh-bridge--prompt-show-history))))
 
 (defun dsh-bridge--prompt-history-record-send (session-id text)
-  "Record a just-sent TEXT to SESSION-ID in the prompt history cache.
-Also returns the prompt buffer to the draft slot (the sent text is now the
-newest prompt) and records the last-sent entry for the `✓ sent' marker and the
-resend guard."
+  "Update prompt history cache with TEXT for SESSION-ID.
+Called from `dsh-bridge-send-text' after a prompt is successfully sent.
+This may be called from any buffer (not only DSH-Prompt)."
   (when session-id
+	;; Add to `dsh-bridge--prompt-history':
 	(let ((entry (assoc session-id dsh-bridge--prompt-history)))
 	  (if entry
 		  (setcdr entry (cons text (cdr entry)))
 		(push (cons session-id (list text)) dsh-bridge--prompt-history)))
 	(setq dsh-bridge--last-sent
-		  (assoc-delete-all session-id dsh-bridge--last-sent))
-	(push (cons session-id (cons text (float-time))) dsh-bridge--last-sent))
-  (when (buffer-live-p (get-buffer "*dsh-bridge-prompt*"))
-	(with-current-buffer "*dsh-bridge-prompt*"
-	  (when (eq major-mode 'dsh-bridge-prompt-mode)
-		(setq-local dsh-bridge--prompt-history-index nil)
-		(setq-local dsh-bridge--prompt-draft nil)))))
+		  (cons `(,session-id . (,text . ,(float-time)))
+				(assoc-delete-all session-id dsh-bridge--last-sent)))
+	;; Invalidate history for any buffer tracking this session.
+	(dolist (buf (buffer-list))
+	  (with-current-buffer buf
+		(when (equal session-id
+					 (or dsh-bridge--prompt-session
+						 dsh-bridge--prompt-history-session))
+		  (setq-local dsh-bridge--prompt-history-index nil)
+		  (setq-local dsh-bridge--prompt-draft nil))))))
+
+(defun dsh-bridge--revert-prompt-buffer (_ignore-auto _noconfirm)
+  "Function to perform `revert-buffer' for DSH-Prompt buffers.
+If walking through the prompt history, then:
+- revert to the original form of the prompt if it has been edited;
+- otherwise, return to the latest draft."
+  (cond
+   ((null dsh-bridge--prompt-history-index)
+	(message "Nothing to revert."))
+   ((buffer-modified-p)
+	;; Restore the pristine version of this history entry.
+	(dsh-bridge--prompt-show-history))
+   (t
+	;; Return to the draft.
+	(setq-local dsh-bridge--prompt-history-index nil)
+	(dsh-bridge--prompt-show-history))))
 
 ;;; Text senders (internal)
 
@@ -2197,62 +2253,42 @@ intended end state."
 ;;;###autoload
 (defun dsh-bridge-send (&optional session-id)
   "Send the region, or the whole buffer, to the DSH session as a prompt.
-The session is the effective session of the current buffer; with a prefix
-argument, choose a session for this call only, without changing the default
-target.	 A whole-buffer send asks for confirmation first, except in
-`dsh-bridge-prompt-mode' where sending the whole buffer is the point; a
-read-only buffer with no active region refuses (there is nothing sensible to
-send)."
+The session is the effective session of the current buffer; with a
+prefix argument, choose a session for this call only."
   (interactive (list (dsh-bridge--read-session-override "Send to session: ")))
-  (let ((whole (not (use-region-p))))
-	(when (and whole buffer-read-only)
-	  (user-error "dsh-bridge: buffer is read-only and no region is active"))
-	(when (and whole
-			   (not (eq major-mode 'dsh-bridge-prompt-mode))
-			   (not (y-or-n-p (format "Send the whole %s buffer to DSH? "
-									  (buffer-name)))))
-	  (user-error "dsh-bridge: aborted"))
-	(dsh-bridge-send-text (dsh-bridge--region-or-buffer) session-id)))
+  (dsh-bridge-send-text (dsh-bridge--region-or-buffer) session-id))
 
 ;;;###autoload
-(defun dsh-bridge-send-and-exit (&optional session-id)
-  "Send the prompt, then (on success) bury the buffer and switch away.
-Like `dsh-bridge-send', but `C-c C-c' has message-mode's send-and-exit feel:
-the buffer survives (unmodified) for edit-and-resubmit, and the window moves
-to `*dsh-bridge-output*' when it shows the same session, else to the previous
-buffer.	 On failure the buffer stays.  When
-`dsh-bridge-prompt-resend-confirm' is non-nil and the text exactly matches the
-session's last-sent text, confirm first; editing one character suppresses it.
-`C-c C-d' (draft) is never guarded."
-  (interactive (list (dsh-bridge--read-session-override "Send to session: ")))
-  (let ((whole (not (use-region-p))))
-	(when (and whole buffer-read-only)
-	  (user-error "dsh-bridge: buffer is read-only and no region is active"))
-	(when (and whole
-			   (not (eq major-mode 'dsh-bridge-prompt-mode))
-			   (not (y-or-n-p (format "Send the whole %s buffer to DSH? "
-									  (buffer-name)))))
-	  (user-error "dsh-bridge: aborted"))
-	;; Guard against an identical re-send to the session this send actually
-	;; targets: the override when given, else the buffer's status session (the
-	;; advisory id the send will resolve to).
-	(let ((guard-session (or session-id (dsh-bridge--prompt-status-session))))
-	  (when (and dsh-bridge-prompt-resend-confirm
-				 (eq major-mode 'dsh-bridge-prompt-mode)
-				 (dsh-bridge--resend-guard-p guard-session
-											 (dsh-bridge--region-or-buffer)))
-		(unless (y-or-n-p (format "Resend same prompt to session \"%s\"? "
-								  (dsh-bridge--session-label guard-session)))
-		  (user-error "dsh-bridge: aborted"))))
-	(dsh-bridge-send-text (dsh-bridge--region-or-buffer) session-id
-						  #'dsh-bridge--prompt-exit)))
+(defun dsh-bridge-send-and-exit ()
+  "Send a DSH-Prompt buffer as a prompt, then bury it and switch away.
+This command must be called in a DSH-Prompt buffer.  It sends the entire
+buffer (like `message-send-and-exit', an active region is ignored), then
+buries it (with contents unmodified for edit-and-resubmit).  The window
+moves to `*dsh-bridge-output*' if it shows the same session, else to the
+previous buffer.  On failure, the buffer stays.
 
-(defun dsh-bridge--resend-guard-p (session-id text)
-  "Whether sending TEXT to SESSION-ID is an identical re-send.
-True when the session's last-sent text equals TEXT (drafts never record, so a
-draft push is never mistaken for a resend)."
-  (let ((entry (and session-id (assoc session-id dsh-bridge--last-sent))))
-	(and entry (equal (car (cdr entry)) text))))
+If `dsh-bridge-prompt-resend-confirm' is non-nil and the text exactly
+matches the session's last-sent text, confirm first."
+  (interactive)
+  (unless (eq major-mode 'dsh-bridge-prompt-mode)
+	(user-error "dsh-bridge: not a DSH-Prompt buffer"))
+  (let ((text (substring-no-properties (buffer-string)))
+		;; The buffer's binding, else the advisory id the send resolves to.
+		(guard-session (dsh-bridge--prompt-status-session)))
+	(if (string-empty-p text)
+		(user-error "dsh-bridge: no text to send")
+	  ;; Guard against an identical re-send to the session.
+	  (when (and dsh-bridge-prompt-resend-confirm
+				 (equal text (car-safe
+							  (cdr-safe
+							   (assoc guard-session dsh-bridge--last-sent))))
+				 (not (y-or-n-p
+					   (format "Resend same prompt to session \"%s\"? "
+							   (dsh-bridge--session-label guard-session)))))
+		(user-error "dsh-bridge: aborted"))
+	  (dsh-bridge-send-text text
+							dsh-bridge--prompt-session
+							#'dsh-bridge--prompt-exit))))
 
 (defun dsh-bridge--prompt-blank ()
   "Erase the prompt buffer and reset its navigation state, if in prompt mode.
@@ -3131,7 +3167,8 @@ would strip them from a copy, so this copies the raw text instead."
 
 (defun dsh-bridge--prompt-mode-setup ()
   "Common setup for `dsh-bridge-prompt-mode'."
-  (setq-local header-line-format '(:eval (dsh-bridge--prompt-header-line))))
+  (setq-local header-line-format '(:eval (dsh-bridge--prompt-header-line)))
+  (setq-local revert-buffer-function #'dsh-bridge--revert-prompt-buffer))
 
 (declare-function markdown-mode "markdown-mode")
 (declare-function dsh-bridge-prompt-mode "dsh-bridge")
@@ -3146,18 +3183,20 @@ into the mode metadata and the docstring generation calls `symbol-name' on it
 `(require \\='markdown-mode nil t)'."
   `(define-derived-mode dsh-bridge-prompt-mode ,parent "DSH-Prompt"
 	 "Major mode for composing DSH prompts.
-`C-c C-c' sends the region or whole buffer and, on success, buries the buffer
-(text survives, unmodified, for edit-and-resubmit; the window moves to the
-output buffer when it shows the same session).	`C-c C-d' pushes it as a
-composer draft, `C-c C-k' erases the buffer, `C-c C-f' fetches the effective
+`C-c C-c' sends the whole buffer (as in Message mode, an active region
+is ignored) and, on success, buries the buffer (text survives,
+unmodified, for edit-and-resubmit; the window moves to the output buffer
+when it shows the same session).  `C-c C-d' pushes it as a composer
+draft, `C-c C-k' erases the buffer, `C-c C-f' fetches the effective
 session's latest reply, `C-c C-s' rebinds this buffer's session, `C-c C-l'
-lists sessions.	 `M-p' and `M-n' walk the session's prompt history, recalling
-earlier prompts (the current draft is restored by `M-n' at the newest
-prompt).  The header shows the session's status glyph and a `✓ sent HH:MM'
-marker when the current text was just sent.	 When the mode derives from
-markdown-mode, several markdown keys are shadowed by the bridge commands
-(C-c C-c, C-c C-d, C-c C-k, C-c C-s, C-c C-f, C-c C-l); the markdown commands
-stay reachable via the menu."
+lists sessions.  `M-p' and `M-n' walk the session's prompt history,
+recalling earlier prompts (the current draft is restored by `M-n' at the
+newest prompt); an edited history entry must be sent or reverted with
+`revert-buffer' before walking on.  The header shows the session's
+status glyph and a `✓ sent HH:MM' marker when the current text was just
+sent.  When the mode derives from markdown-mode, several markdown keys
+are shadowed by the bridge commands (C-c C-c, C-c C-d, C-c C-k, C-c C-s,
+C-c C-f, C-c C-l); the markdown commands stay reachable via the menu."
 	 (dsh-bridge--prompt-mode-setup)))
 
 ;; The map is created by whichever branch of the `if' runs; declare it here so
@@ -3202,7 +3241,7 @@ the default target again.  Only this buffer is affected."
   "Menu bar menu for the `*dsh-bridge-prompt*' buffer."
   '("DSH Bridge"
 	["Send" dsh-bridge-send-and-exit
-	 :help "Send the region (or whole buffer) to DSH and bury the prompt buffer"]
+	 :help "Send the whole buffer to DSH and bury the prompt buffer"]
 	["Send as Draft" dsh-bridge-draft
 	 :help "Send the region (or whole buffer) to the DSH composer as a draft"]
 	["Erase Prompt" dsh-bridge-erase-prompt
@@ -3248,13 +3287,19 @@ the default target again.  Only this buffer is affected."
 	 "*dsh-bridge-prompt*")))
 
 (defun dsh-bridge--set-prompt-session (session-id)
-  "Bind the prompt buffer to SESSION-ID (nil = follow the default target).
-Updates the header and the session directory, and warns when unsent text
-would now target a different session."
+  "Bind the DSH-Prompt buffer to SESSION-ID.
+If SESSION-ID is nil, that means to follow the default target.
+Updates the header and the session directory, resets the prompt-history
+walk when the binding changes, and warns when unsent text would now
+target a different session."
   (with-current-buffer (dsh-bridge--prompt-buffer)
-	(when (and (not (equal session-id dsh-bridge--prompt-session))
-			   (not (string-blank-p (buffer-string))))
-	  (message "dsh-bridge: unsent text remains"))
+	(when (not (equal session-id dsh-bridge--prompt-session))
+	  (unless (string-blank-p (buffer-string))
+		(message "dsh-bridge: unsent text remains"))
+	  ;; The history walk refers to the old session; reset it.
+	  (setq-local dsh-bridge--prompt-history-index nil)
+	  (setq-local dsh-bridge--prompt-draft nil)
+	  (setq-local dsh-bridge--prompt-history-session nil))
 	(setq-local dsh-bridge--prompt-session session-id)
 	(setq header-line-format '(:eval (dsh-bridge--prompt-header-line)))
 	(dsh-bridge--apply-session-directory session-id nil (current-buffer))
