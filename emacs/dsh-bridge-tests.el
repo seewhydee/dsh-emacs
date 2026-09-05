@@ -306,21 +306,20 @@ recorded."
     (should (equal (cadr captured) "/draft"))
     (should (equal (cdr (assoc 'sessionId (caddr captured))) "override"))))
 
-(ert-deftest dsh-bridge-send-draft-blank-origin-only ()
-  "A successful draft push blanks the prompt buffer only when the draft was
-sent *from* it; a draft from any other buffer leaves unsent prompt text alone."
+(ert-deftest dsh-bridge-send-draft-keeps-prompt-text ()
+  "A successful draft push leaves the prompt buffer alone; the buffer is
+blanked when a new composition starts, not when a draft is sent."
   (let ((dsh-bridge-default-session "s1"))
     (cl-letf (((symbol-function 'dsh-bridge--call)
                (lambda (_m _p _pl cb) (funcall cb nil "{\"sessionId\":\"s1\"}" 200))))
-      ;; From the prompt buffer: blanked (the composer now owns the text).
       (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
         (dsh-bridge-prompt-mode)
         (insert "prompt text")
         (dsh-bridge-send-draft "prompt text")
-        (should (equal (buffer-string) ""))
-        (should-not (buffer-modified-p)))
-      ;; From any other buffer: the prompt buffer is untouched.
+        (should (equal (buffer-string) "prompt text")))
+      ;; A draft from any other buffer likewise leaves it untouched.
       (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+        (erase-buffer)
         (insert "unrelated unsent text"))
       (with-temp-buffer
         (dsh-bridge-send-draft "region from elsewhere"))
@@ -529,7 +528,7 @@ a `running:false' session used to be seeded `running' and show amber)."
       (dsh-bridge-fetch))
     (with-current-buffer "*dsh-bridge-output*"
       (should (equal default-directory "/w/sess1/")))
-    (kill-buffer "*dsh-bridge-output*"))))
+    (kill-buffer "*dsh-bridge-output*")))
 
 ;;; The prompt buffer: session binding, header, history
 
@@ -538,10 +537,18 @@ a `running:false' session used to be seeded `running' and show amber)."
   (when (get-buffer "*dsh-bridge-prompt*")
     (kill-buffer "*dsh-bridge-prompt*"))
   (let ((dsh-bridge--sessions-cache '(((id . "s1") (cwd . "/w/sess1") (live . t)))))
-    (dsh-bridge--set-prompt-session "s1")
-    (with-current-buffer "*dsh-bridge-prompt*"
-      (should (equal default-directory "/w/sess1/"))))
+    (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+      (dsh-bridge-prompt-mode)
+      (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata)
+                 #'ignore))
+        (dsh-bridge-set-prompt-session "s1")
+        (should (equal default-directory "/w/sess1/")))))
   (kill-buffer "*dsh-bridge-prompt*"))
+
+(ert-deftest dsh-bridge-set-prompt-session-requires-prompt-mode ()
+  "`dsh-bridge-set-prompt-session' refuses to run outside DSH-Prompt buffers."
+  (with-temp-buffer
+    (should-error (dsh-bridge-set-prompt-session "s1") :type 'user-error)))
 
 (ert-deftest dsh-bridge-set-default-target-sets-prompt-directory ()
   "Setting the default target re-points an unbound prompt buffer's directory."
@@ -573,7 +580,7 @@ binds the compose keys plus fetch/set-session/list."
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-f"))
               #'dsh-bridge-fetch))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-s"))
-              #'dsh-bridge-set-buffer-session))
+              #'dsh-bridge-set-prompt-session))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "C-c C-l"))
               #'dsh-bridge-list-sessions))
   (should (eq (lookup-key dsh-bridge-prompt-mode-map (kbd "M-p"))
@@ -606,16 +613,16 @@ binds the compose keys plus fetch/set-session/list."
         (should-not (string-match-p "Untitled"
                                     (dsh-bridge--prompt-header-line)))))))
 
-(ert-deftest dsh-bridge-set-buffer-session-binds ()
-  "`C-c C-s' rebinds the prompt buffer's session."
+(ert-deftest dsh-bridge-set-prompt-session-binds ()
+  "`C-c C-s' rebinds the current DSH-Prompt buffer's session."
   (let ((dsh-bridge-default-session "default"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
       (cl-letf (((symbol-function 'dsh-bridge--read-session-id)
                  (lambda (_prompt _pseudo) "live-1"))
-                ((symbol-function 'dsh-bridge--set-prompt-session)
-                 (lambda (id) (setq-local dsh-bridge--prompt-session id))))
-        (dsh-bridge-set-buffer-session))
+                ((symbol-function 'dsh-bridge--refresh-prompt-metadata)
+                 #'ignore))
+        (call-interactively #'dsh-bridge-set-prompt-session))
       (should (equal dsh-bridge--prompt-session "live-1")))))
 
 (ert-deftest dsh-bridge-prompt-history-navigation ()
@@ -623,6 +630,7 @@ binds the compose keys plus fetch/set-session/list."
   (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (_method _path _payload)
                    (cons 200 (list (cons 'sessionId "s1")
@@ -655,6 +663,7 @@ binds the compose keys plus fetch/set-session/list."
   (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (method path _payload)
                    (should (equal method "GET"))
@@ -671,6 +680,7 @@ binds the compose keys plus fetch/set-session/list."
   (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (_method _path _payload)
                    (cons 200 (list (cons 'sessionId "s1")
@@ -702,6 +712,7 @@ binds the compose keys plus fetch/set-session/list."
   (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (_m _p _pl)
                    (cons 200 (list (cons 'sessionId "s1")
@@ -720,6 +731,7 @@ draft when the entry shown is pristine."
   (let ((dsh-bridge-default-session "s1"))
     (with-temp-buffer
       (dsh-bridge-prompt-mode)
+      (setq-local dsh-bridge--prompt-session "s1")
       (should (eq revert-buffer-function #'dsh-bridge--revert-prompt-buffer))
       (cl-letf (((symbol-function 'dsh-bridge--request)
                  (lambda (_m _p _pl)
@@ -809,10 +821,9 @@ session and never touches the default target."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "shown")
-      (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
-                 (lambda (id) (setq bound id)))
-                ((symbol-function 'dsh-bridge--prompt-buffer)
-                 (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
+      (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
+                 (lambda (id) (setq bound id)
+                         (get-buffer-create "*dsh-bridge-prompt*")))
                 ((symbol-function 'pop-to-buffer)
                  (lambda (buf action) (setq popped (list buf action)))))
         (dsh-bridge-reply))
@@ -829,7 +840,7 @@ attempt."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "gone")
-      (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+      (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                  (lambda (id) (setq bound id)))
                 ((symbol-function 'dsh-bridge--resume-session)
                  (lambda (id) (setq resumed id) nil))
@@ -847,7 +858,7 @@ attempt."
     (with-temp-buffer
       (dsh-bridge-view-mode)
       (setq-local dsh-bridge--view-content-session "saved-1")
-      (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+      (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                  (lambda (id) (setq bound id)))
                 ((symbol-function 'dsh-bridge--resume-session)
                  (lambda (_id) (message "dsh-bridge: HTTP 409: subagent-owned") nil))
@@ -1099,10 +1110,9 @@ untouched."
     ;; `tabulated-list-get-id' is a defsubst: byte-compilation inlines it,
     ;; so cl-letf cannot mock it.  Stand point on a real tabulated-list-id
     ;; text property instead.
-    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
-               (lambda (id) (setq bound id)))
-              ((symbol-function 'dsh-bridge--prompt-buffer)
-               (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
+    (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
+               (lambda (id) (setq bound id)
+                       (get-buffer-create "*dsh-bridge-prompt*")))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
       (with-temp-buffer
         (insert (propertize "live-1 row" 'tabulated-list-id "live-1"))
@@ -1117,7 +1127,7 @@ untouched."
 attempt."
   (let ((dsh-bridge--sessions-cache nil)
         (bound nil) (msg nil) (resumed nil))
-    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+    (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                (lambda (id) (setq bound id)))
               ((symbol-function 'dsh-bridge--resume-session)
                (lambda (id) (setq resumed id) nil))
@@ -1135,7 +1145,7 @@ attempt."
   "RET on a saved row whose resume fails keeps the host's error message."
   (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
         (bound nil) (msg nil))
-    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
+    (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
                (lambda (id) (setq bound id)))
               ((symbol-function 'dsh-bridge--resume-session)
                (lambda (_id) (message "dsh-bridge: HTTP 409: subagent-owned") nil))
@@ -1152,12 +1162,11 @@ attempt."
   "RET on a saved row resumes it first, then binds the prompt buffer."
   (let ((dsh-bridge--sessions-cache '(((id . "saved-1") (live . nil))))
         (bound nil) (popped nil) (resumed nil))
-    (cl-letf (((symbol-function 'dsh-bridge--set-prompt-session)
-               (lambda (id) (setq bound id)))
-              ((symbol-function 'dsh-bridge--resume-session)
+    (cl-letf (((symbol-function 'dsh-bridge--resume-session)
                (lambda (id) (setq resumed id) t))
               ((symbol-function 'dsh-bridge--prompt-buffer)
-               (lambda () (get-buffer-create "*dsh-bridge-prompt*")))
+               (lambda (id) (setq bound id)
+                       (get-buffer-create "*dsh-bridge-prompt*")))
               ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq popped t))))
       (with-temp-buffer
         (insert (propertize "saved-1 row" 'tabulated-list-id "saved-1"))
@@ -2763,6 +2772,67 @@ so the next reply starts blank (the sent text remains in history)."
     (should (null dsh-bridge--prompt-draft))
     (should-not (buffer-modified-p)))
   (kill-buffer "*dsh-bridge-prompt*"))
+
+(ert-deftest dsh-bridge-prompt-buffer-confirms-before-erasing ()
+  "Preparing a prompt buffer asks before erasing modified text, and
+silently erases unmodified text (e.g. kept from a previous send)."
+  (when (get-buffer "*dsh-bridge-prompt*")
+    (kill-buffer "*dsh-bridge-prompt*"))
+  (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata) #'ignore))
+    (with-current-buffer (dsh-bridge--prompt-buffer "s1")
+      (insert "unsent text"))
+    ;; Answering "no" keeps the modified text.
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
+      (dsh-bridge--prompt-buffer "s1"))
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (should (equal (buffer-string) "unsent text")))
+    ;; Answering "yes" erases it.
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+      (dsh-bridge--prompt-buffer "s1"))
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (should (equal (buffer-string) "")))
+    ;; Unmodified text is erased without asking.
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (insert "kept from a previous send")
+      (set-buffer-modified-p nil))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (_) (error "should not ask"))))
+      (dsh-bridge--prompt-buffer "s1"))
+    (with-current-buffer "*dsh-bridge-prompt*"
+      (should (equal (buffer-string) ""))))
+  (kill-buffer "*dsh-bridge-prompt*"))
+
+(ert-deftest dsh-bridge-prompt-buffer-reuses-renamed-buffer ()
+  "A renamed DSH-Prompt buffer bound to the session is reused, not replaced."
+  (when (get-buffer "*dsh-bridge-prompt*")
+    (kill-buffer "*dsh-bridge-prompt*"))
+  (with-current-buffer (get-buffer-create "*dsh-bridge-prompt*")
+    (dsh-bridge-prompt-mode)
+    (setq-local dsh-bridge--prompt-session "s1")
+    (rename-buffer "prompt-s1" t))
+  (cl-letf (((symbol-function 'dsh-bridge--refresh-prompt-metadata) #'ignore))
+    (should (eq (dsh-bridge--prompt-buffer "s1") (get-buffer "prompt-s1")))
+    ;; A different session does not reuse it; it gets the canonical buffer.
+    (should (eq (dsh-bridge--prompt-buffer "s2")
+                (get-buffer "*dsh-bridge-prompt*"))))
+  (kill-buffer "prompt-s1")
+  (kill-buffer "*dsh-bridge-prompt*"))
+
+(ert-deftest dsh-bridge-prompt-binds-effective-session ()
+  "`dsh-bridge-prompt' prepares the prompt buffer for the current buffer's
+effective session (the dispatcher's `r' continues the shown conversation)."
+  (let ((dsh-bridge-default-session "target")
+        (got nil))
+    (with-temp-buffer
+      (dsh-bridge-view-mode)
+      (setq-local dsh-bridge--view-content-session "shown")
+      (cl-letf (((symbol-function 'dsh-bridge--prompt-buffer)
+                 (lambda (id) (setq got id)
+                         (get-buffer-create "*dsh-bridge-prompt*")))
+                ((symbol-function 'pop-to-buffer) #'ignore))
+        (dsh-bridge-prompt)))
+    (should (equal got "shown"))
+    (kill-buffer "*dsh-bridge-prompt*")))
 
 (ert-deftest dsh-bridge-replies-changed-refills-following ()
   "A replies-changed frame refills the shown turn-following view to the newest

@@ -198,17 +198,26 @@ This buffer is used to compose a prompt, or reply, for a DSH session.
 It is opened by `r`/`RET` from the DSH-Sessions buffer, and `r` from
 the transient menu or DSH-View buffer.  The session affected is
 determined by how this buffer was invoked; for instance, `r` from a
-DSH-View buffer opens a prompt for the same session.
+DSH-View buffer opens a prompt for the same session.  If a renamed
+DSH-Prompt buffer is already bound to that session, it is reused.
+
+Opening a prompt starts a fresh composition: text kept from a previous
+send is erased silently, while an unsent or further-edited draft is
+erased only after a `y-or-n-p` confirmation (answering "no" keeps the
+text).  Use `C-c C-s` to rebind the buffer to another session.
 
 The following commands are available from the DSH-Prompt buffer:
 
 * `C-c C-c` — send the whole buffer as a prompt (an active region is
-  ignored, as in Message mode).  On success, clear the buffer and pop to
-  the DSH-View for that session in turn-following state.  The sent text
-  stays in the prompt history, so `M-p` retrieves it.
-* `C-c C-d` — push it to the DSH composer as a draft instead.  On
-  success, clear the buffer (the composer now owns the text).
+  ignored, as in Message mode).  On success, bury the buffer (keeping
+  its text) and pop to the DSH-View for that session in turn-following
+  state.  The sent text stays in the prompt history, so `M-p`
+  retrieves it.
+* `C-c C-d` — push it to the DSH composer as a draft instead.  The
+  buffer's text is left in place.
 * `C-c C-m` — set the model and reasoning effort.
+* `C-c C-s` — rebind this buffer to a chosen session (or follow the
+  default target).
 * `C-c C-k` — erase the buffer.
 * `C-c C-f` — open the DSH-View buffer for this session.
 * `C-c C-l` — open the DSH-Sessions buffer.
